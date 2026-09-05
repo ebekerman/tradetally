@@ -42,6 +42,7 @@ const TIMEZONE_ABBREVIATION_OFFSETS = {
   CEST: '+02:00',
   EET: '+02:00',
   EEST: '+03:00',
+  IDT: '+03:00',
   JST: '+09:00',
   KST: '+09:00',
   AEST: '+10:00',

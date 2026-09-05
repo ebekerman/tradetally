@@ -188,6 +188,7 @@ if (process.env.NODE_ENV !== 'production') {
     'http://localhost:3000',
     'http://localhost:8080',
     'http://localhost:8081',
+    'http://localhost:8088',
     'capacitor://localhost',
     'ionic://localhost',
     'http://localhost'

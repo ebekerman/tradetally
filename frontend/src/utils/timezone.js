@@ -27,13 +27,16 @@ export const TIMEZONE_OPTIONS = [
   { value: 'Europe/Zurich', label: 'Zurich (CET/CEST)', group: 'Europe' },
   { value: 'Europe/Moscow', label: 'Moscow (MSK)', group: 'Europe' },
 
+  // Middle East
+  { value: 'Asia/Jerusalem', label: 'Jerusalem (IST/IDT)', group: 'Middle East' },
+  { value: 'Asia/Dubai', label: 'Dubai (GST)', group: 'Middle East' },
+
   // Asia Pacific
   { value: 'Asia/Tokyo', label: 'Tokyo (JST)', group: 'Asia Pacific' },
   { value: 'Asia/Hong_Kong', label: 'Hong Kong (HKT)', group: 'Asia Pacific' },
   { value: 'Asia/Singapore', label: 'Singapore (SGT)', group: 'Asia Pacific' },
   { value: 'Asia/Shanghai', label: 'Shanghai (CST)', group: 'Asia Pacific' },
   { value: 'Asia/Seoul', label: 'Seoul (KST)', group: 'Asia Pacific' },
-  { value: 'Asia/Dubai', label: 'Dubai (GST)', group: 'Asia Pacific' },
   { value: 'Asia/Kolkata', label: 'India (IST)', group: 'Asia Pacific' },
   { value: 'Australia/Sydney', label: 'Sydney (AEST/AEDT)', group: 'Asia Pacific' },
   { value: 'Australia/Perth', label: 'Perth (AWST)', group: 'Asia Pacific' },
@@ -66,12 +69,13 @@ export function getTimezoneLabel(timezone) {
     'Europe/Amsterdam': 'CET',
     'Europe/Zurich': 'CET',
     'Europe/Moscow': 'MSK',
+    'Asia/Jerusalem': 'IDT',
+    'Asia/Dubai': 'GST',
     'Asia/Tokyo': 'JST',
     'Asia/Hong_Kong': 'HKT',
     'Asia/Singapore': 'SGT',
     'Asia/Shanghai': 'CST',
     'Asia/Seoul': 'KST',
-    'Asia/Dubai': 'GST',
     'Asia/Kolkata': 'IST',
     'Australia/Sydney': 'AEST',
     'Australia/Perth': 'AWST',
