@@ -356,19 +356,24 @@
             </div>
             <div>
               <div class="text-gray-500 dark:text-gray-400">Net P&L</div>
-              <div v-if="!isTradeOpen(trade)" class="font-medium" :class="[
-                trade.pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
-              ]">
-                {{ formatTradeSignedCurrency(trade.pnl, trade) }}
-                <span v-if="trade.pnl_percent" class="text-xs ml-1">
-                  ({{ trade.pnl_percent > 0 ? '+' : '' }}{{ formatNumber(trade.pnl_percent) }}%)
-                </span>
-              </div>
+              <template v-if="!isTradeOpen(trade) || hasTradePnl(trade)">
+                <div class="font-medium" :class="[
+                  trade.pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
+                ]">
+                  {{ formatTradeSignedCurrency(trade.pnl, trade) }}
+                  <span v-if="trade.pnl_percent" class="text-xs ml-1">
+                    ({{ trade.pnl_percent > 0 ? '+' : '' }}{{ formatNumber(trade.pnl_percent) }}%)
+                  </span>
+                  <span v-if="isTradeOpen(trade)" class="text-[10px] text-gray-400 dark:text-gray-500 ml-1">
+                    (realized)
+                  </span>
+                </div>
+              </template>
               <div v-else class="font-medium text-gray-400 dark:text-gray-500">-</div>
             </div>
             <div>
               <div class="text-gray-500 dark:text-gray-400">Gross P&L</div>
-              <div v-if="!isTradeOpen(trade)" class="font-medium" :class="[
+              <div v-if="!isTradeOpen(trade) || hasTradePnl(trade)" class="font-medium" :class="[
                 getTradeGrossPnl(trade) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
               ]">
                 {{ formatTradeSignedCurrency(getTradeGrossPnl(trade), trade) }}
@@ -597,22 +602,28 @@
                 <td v-else-if="column.visible && column.key === 'pnl'" 
                     :class="[getCellPadding, 'whitespace-nowrap cursor-pointer']" 
                     @click="$router.push(`/trades/${trade.id}`)">
-                  <div v-if="!isTradeOpen(trade)" class="text-sm font-medium" :class="[
-                    trade.pnl >= 0 ? 'text-green-600' : 'text-red-600'
-                  ]">
-                    {{ formatTradeSignedCurrency(trade.pnl, trade) }}
-                  </div>
-                  <div v-if="!isTradeOpen(trade) && trade.pnl_percent" class="text-xs text-gray-500 dark:text-gray-400">
-                    {{ trade.pnl_percent > 0 ? '+' : '' }}{{ formatNumber(trade.pnl_percent) }}%
-                  </div>
-                  <div v-if="isTradeOpen(trade)" class="text-sm text-gray-400 dark:text-gray-500">-</div>
+                  <template v-if="!isTradeOpen(trade) || hasTradePnl(trade)">
+                    <div class="text-sm font-medium" :class="[
+                      trade.pnl >= 0 ? 'text-green-600' : 'text-red-600'
+                    ]">
+                      {{ formatTradeSignedCurrency(trade.pnl, trade) }}
+                    </div>
+                    <div v-if="trade.pnl_percent" class="text-xs text-gray-500 dark:text-gray-400">
+                      {{ trade.pnl_percent > 0 ? '+' : '' }}{{ formatNumber(trade.pnl_percent) }}%
+                      <span v-if="isTradeOpen(trade)" class="text-[10px] text-gray-400 dark:text-gray-500 ml-0.5">(realized)</span>
+                    </div>
+                    <div v-else-if="isTradeOpen(trade)" class="text-[10px] text-gray-400 dark:text-gray-500">
+                      (realized)
+                    </div>
+                  </template>
+                  <div v-else class="text-sm text-gray-400 dark:text-gray-500">-</div>
                 </td>
 
                 <!-- Gross P&L Column -->
                 <td v-else-if="column.visible && column.key === 'grossPnl'"
                     :class="[getCellPadding, 'whitespace-nowrap cursor-pointer']"
                     @click="$router.push(`/trades/${trade.id}`)">
-                  <div v-if="!isTradeOpen(trade)" class="text-sm font-medium" :class="[
+                  <div v-if="!isTradeOpen(trade) || hasTradePnl(trade)" class="text-sm font-medium" :class="[
                     getTradeGrossPnl(trade) >= 0 ? 'text-green-600' : 'text-red-600'
                   ]">
                     {{ formatTradeSignedCurrency(getTradeGrossPnl(trade), trade) }}
@@ -1101,7 +1112,7 @@ import { mdiNewspaper } from '@mdi/js'
 import api from '@/services/api'
 import { useCurrencyFormatter } from '@/composables/useCurrencyFormatter'
 import { getTradeDateOnlyParts } from '@/utils/date'
-import { getTradeGrossPnl, isTradeOpen } from '@/utils/tradePnl'
+import { getTradeGrossPnl, hasTradePnl, isTradeOpen } from '@/utils/tradePnl'
 
 const tradesStore = useTradesStore()
 const uiPreferencesStore = useUiPreferencesStore()

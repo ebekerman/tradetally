@@ -99,6 +99,19 @@ docker run -d -p 80:80 potentialmidas/tradetally:latest
 
 See the [Docker Deployment Guide](https://docs.tradetally.io/deployment/docker/) for production setup.
 
+### Rebuild the app image with your code changes and restart the container
+
+```bash
+docker compose up -d --build app
+```
+
+### (Optional) Follow container logs to verify startup and database migrations
+
+```bash
+docker compose logs -f app
+```
+
+
 ## Documentation
 
 Comprehensive documentation is available at [docs.tradetally.io](https://docs.tradetally.io):

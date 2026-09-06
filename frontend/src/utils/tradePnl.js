@@ -8,8 +8,12 @@ export function isTradeOpen(trade) {
   return !trade?.exit_price && !trade?.exit_time
 }
 
+export function hasTradePnl(trade) {
+  return trade?.pnl !== null && trade?.pnl !== undefined && trade?.pnl !== ''
+}
+
 export function getTradeGrossPnl(trade) {
-  if (isTradeOpen(trade)) {
+  if (isTradeOpen(trade) && !hasTradePnl(trade)) {
     return 0
   }
 
@@ -20,7 +24,7 @@ export function getTradeGrossPnl(trade) {
 }
 
 export function getTradeNetPnl(trade) {
-  if (isTradeOpen(trade)) {
+  if (isTradeOpen(trade) && !hasTradePnl(trade)) {
     return 0
   }
 

@@ -461,6 +461,14 @@ describe('TradeQueries.getAnalytics characterization', () => {
       expect(sql).toContain('t.exit_price IS NOT NULL');
     });
 
+    test('status open: allows open trades with realized P&L in completed_trades CTE', async () => {
+      await TradeQueries.getAnalytics('user-1', { status: 'open' });
+      const sql = captureSql();
+      expect(sql).toContain('t.entry_price IS NOT NULL AND t.exit_price IS NULL');
+      // Ensure completed_trades CTE does not conflict with t.exit_price IS NULL
+      expect(sql).not.toContain('AND exit_price IS NOT NULL');
+    });
+
     // Breakeven is judged on GROSS P&L (net + commission + fees). Wins/losses
     // exclude gross-breakeven trades and then split on net P&L.
     const GROSS = '(t.pnl + COALESCE(t.commission, 0) + COALESCE(t.fees, 0))';

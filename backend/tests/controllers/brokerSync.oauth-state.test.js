@@ -63,7 +63,7 @@ describe('Schwab OAuth state — server-side binding', () => {
     expect(params[1]).toBe('user-123');
     expect(params[2]).toBe('schwab');
     expect(params[3]).toBeInstanceOf(Date);
-    expect(JSON.parse(params[4])).toEqual({ platform: 'web' });
+    expect(JSON.parse(params[4])).toMatchObject({ platform: 'web' });
 
     // authUrl must include the state as-is (no client-readable base64 payload)
     const stateParam = new URL(res.payload.authUrl).searchParams.get('state');

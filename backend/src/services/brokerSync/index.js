@@ -53,15 +53,16 @@ class BrokerSyncService {
       throw new Error(`Cannot sync: connection status is ${connection.connectionStatus}`);
     }
 
-    // Apply the connection's configured sync floor when the caller didn't pass
-    // an explicit startDate. This makes scheduled syncs respect the user's
-    // chosen lookback window (e.g. "this year only") without re-specifying it
-    // each time. An ad-hoc manual sync can still override by passing startDate.
-    if (!startDate && connection.syncStartDate) {
+    // Apply the connection's configured sync floor. If the caller didn't pass
+    // an explicit startDate, or passed a date prior to the configured floor,
+    // clamp startDate to the floor so historical trades prior to it are ignored.
+    if (connection.syncStartDate) {
       const floor = connection.syncStartDate instanceof Date
         ? connection.syncStartDate.toISOString().slice(0, 10)
         : String(connection.syncStartDate).slice(0, 10);
-      startDate = floor;
+      if (!startDate || startDate < floor) {
+        startDate = floor;
+      }
     }
 
     // Create sync log

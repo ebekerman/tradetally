@@ -610,6 +610,83 @@ describe('broker sync duplicate protection', () => {
     expect(params).toEqual(['user-1', '2026-03-05', '2026-03-08']);
   });
 
+  test('Schwab importTrades filters out trades prior to options.startDate', async () => {
+    db.query.mockResolvedValueOnce({ rows: [] });
+    Trade.create.mockResolvedValue({ id: 'trade-new' });
+
+    const trades = [
+      {
+        symbol: 'OLD',
+        tradeDate: '2024-12-31',
+        entryTime: '2024-12-31T10:00:00Z',
+        side: 'long',
+        quantity: 10,
+        entryPrice: 50,
+        executionData: [{ datetime: '2024-12-31T10:00:00Z', quantity: 10, type: 'entry' }]
+      },
+      {
+        symbol: 'NEW',
+        tradeDate: '2025-01-01',
+        entryTime: '2025-01-01T10:00:00Z',
+        side: 'long',
+        quantity: 10,
+        entryPrice: 50,
+        executionData: [{ datetime: '2025-01-01T10:00:00Z', quantity: 10, type: 'entry' }]
+      }
+    ];
+
+    const result = await schwabService.importTrades('user-1', 'conn-1', trades, { startDate: '2025-01-01' });
+
+    expect(Trade.create).toHaveBeenCalledTimes(1);
+    expect(Trade.create).toHaveBeenCalledWith('user-1', expect.objectContaining({ symbol: 'NEW' }), expect.any(Object));
+    expect(result.imported).toBe(1);
+    expect(result.skipped).toBe(1);
+  });
+
+  test('Schwab syncTrades clamps startDate to connection.syncStartDate and filters earlier trades', async () => {
+    const ensureTokenSpy = jest.spyOn(schwabService, 'ensureValidToken')
+      .mockResolvedValue({ accessToken: 'access-token', needsReauth: false });
+    const accountNumbersSpy = jest.spyOn(schwabService, 'getAccountNumbers')
+      .mockResolvedValue([{ accountNumber: '11111111', hashValue: 'hash-1' }]);
+    const transactionsSpy = jest.spyOn(schwabService, 'getTransactions')
+      .mockResolvedValue([]);
+    const parseSpy = jest.spyOn(schwabService, 'parseTransactions')
+      .mockReturnValue([
+        { symbol: 'OLD', tradeDate: '2024-12-15' },
+        { symbol: 'VALID', tradeDate: '2025-01-05' }
+      ]);
+    const importSpy = jest.spyOn(schwabService, 'importTrades')
+      .mockResolvedValue({ imported: 1, skipped: 0, failed: 0, duplicates: 0 });
+
+    try {
+      await schwabService.syncTrades({
+        id: 'connection-1',
+        userId: 'user-1',
+        syncStartDate: '2025-01-01'
+      }, { startDate: '2024-01-01' });
+
+      expect(transactionsSpy).toHaveBeenCalledWith(
+        'access-token',
+        'hash-1',
+        '2025-01-01',
+        undefined
+      );
+
+      expect(importSpy).toHaveBeenCalledWith(
+        'user-1',
+        'connection-1',
+        [expect.objectContaining({ symbol: 'VALID' })],
+        expect.objectContaining({ startDate: '2025-01-01' })
+      );
+    } finally {
+      ensureTokenSpy.mockRestore();
+      accountNumbersSpy.mockRestore();
+      transactionsSpy.mockRestore();
+      parseSpy.mockRestore();
+      importSpy.mockRestore();
+    }
+  });
+
   test('Schwab parseTransactions uses intraday time for same-day partial exits', () => {
     const schwabTrade = ({ orderId, tradeDate, time, price, amount, positionEffect, netAmount }) => ({
       type: 'TRADE',

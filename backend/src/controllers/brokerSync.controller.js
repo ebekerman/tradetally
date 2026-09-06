@@ -306,7 +306,14 @@ const brokerSyncController = {
   async initSchwabOAuth(req, res, next) {
     try {
       const userId = req.user.id;
-      const { platform } = req.body || {};
+      const {
+        platform,
+        syncStartDate = null,
+        accountLabel = '',
+        autoSyncEnabled = false,
+        syncFrequency = 'daily',
+        syncTime = '06:00:00'
+      } = req.body || {};
 
       // Broker sync is a Pro feature
       const access = await TierService.canCreateBrokerConnection(userId, req.headers?.host);
@@ -327,7 +334,14 @@ const brokerSyncController = {
       // client-supplied state blob (which was forgeable in the legacy design).
       const stateToken = crypto.randomBytes(32).toString('hex');
       const expiresAt = new Date(Date.now() + OAUTH_STATE_TTL_MS);
-      const context = { platform: platform === 'ios' ? 'ios' : 'web' };
+      const context = {
+        platform: platform === 'ios' ? 'ios' : 'web',
+        syncStartDate: syncStartDate || null,
+        accountLabel: accountLabel || null,
+        autoSyncEnabled: Boolean(autoSyncEnabled),
+        syncFrequency: syncFrequency || 'daily',
+        syncTime: syncTime || '06:00:00'
+      };
 
       await db.query(
         `INSERT INTO oauth_pending_states (state_token, user_id, provider, expires_at, context)
@@ -449,6 +463,15 @@ const brokerSyncController = {
 
       // Create or update connection
       console.log('[SCHWAB-OAUTH] Creating broker connection for user:', userId);
+      let savedContext = {};
+      try {
+        savedContext = typeof stateLookup.rows[0].context === 'string'
+          ? JSON.parse(stateLookup.rows[0].context || '{}')
+          : (stateLookup.rows[0].context || {});
+      } catch (_) {
+        savedContext = {};
+      }
+
       const connection = await BrokerConnection.create(userId, {
         brokerType: 'schwab',
         schwabAccessToken: access_token,
@@ -461,13 +484,24 @@ const brokerSyncController = {
             .filter(Boolean)
             .map(accountIdentifier => ({ account_identifier: accountIdentifier }))
         },
-        autoSyncEnabled: false,
-        syncFrequency: 'daily'
+        accountLabel: savedContext.accountLabel || null,
+        autoSyncEnabled: Boolean(savedContext.autoSyncEnabled),
+        syncFrequency: savedContext.syncFrequency || 'daily',
+        syncTime: savedContext.syncTime || '06:00:00',
+        syncStartDate: savedContext.syncStartDate || null
       });
       console.log('[SCHWAB-OAUTH] Connection created:', connection.id);
 
       await BrokerConnection.updateStatus(connection.id, 'active', 'OAuth connection successful');
       console.log('[SCHWAB-OAUTH] Connection status updated to active');
+
+      if (savedContext.autoSyncEnabled && savedContext.syncFrequency !== 'manual') {
+        const userTimezone = await getUserTimezone(userId);
+        const nextSync = BrokerConnection.calculateNextSync(savedContext.syncFrequency, savedContext.syncTime || '06:00:00', userTimezone);
+        if (nextSync) {
+          await BrokerConnection.update(connection.id, { nextScheduledSync: nextSync });
+        }
+      }
 
       console.log(`[BROKER-SYNC] Schwab connection created for user ${userId}`);
 
@@ -488,6 +522,208 @@ const brokerSyncController = {
         details: error.message || 'oauth_failed',
         status: errorCode
       });
+    }
+  },
+
+  /**
+   * Import Schwab tokens from JSON file / payload
+   */
+  async importSchwabTokens(req, res, next) {
+    try {
+      const userId = req.user.id;
+
+      // Broker sync is a Pro feature
+      const access = await TierService.canCreateBrokerConnection(userId, req.headers?.host);
+      if (!access.allowed) {
+        return sendProRequired(res, access);
+      }
+
+      const {
+        tokenData,
+        accountLabel = '',
+        autoSyncEnabled = false,
+        syncFrequency = 'daily',
+        syncTime = '06:00:00',
+        syncStartDate = null
+      } = req.body;
+
+      let raw = tokenData;
+      if (typeof raw === 'string') {
+        try {
+          raw = JSON.parse(raw);
+        } catch (parseErr) {
+          return res.status(400).json({
+            success: false,
+            error: 'Invalid JSON format in token file'
+          });
+        }
+      }
+
+      if (!raw || typeof raw !== 'object') {
+        return res.status(400).json({
+          success: false,
+          error: 'Token data must be a valid JSON object'
+        });
+      }
+
+      // Support schwab-py format (where tokens are nested in raw.token)
+      const tokenObj = raw.token && typeof raw.token === 'object' ? raw.token : raw;
+
+      let accessToken = tokenObj.access_token || tokenObj.accessToken || null;
+      let refreshToken = tokenObj.refresh_token || tokenObj.refreshToken || null;
+
+      if (!accessToken && !refreshToken) {
+        return res.status(400).json({
+          success: false,
+          error: 'Token file must contain at least access_token or refresh_token'
+        });
+      }
+
+      // Determine expiration timestamp
+      let expiresAt = null;
+      const rawExpiresAt = tokenObj.expires_at ?? tokenObj.expiresAt ?? raw.expires_at ?? raw.expiresAt;
+      const rawExpiresIn = tokenObj.expires_in ?? tokenObj.expiresIn ?? raw.expires_in ?? raw.expiresIn;
+
+      if (rawExpiresAt !== undefined && rawExpiresAt !== null) {
+        if (typeof rawExpiresAt === 'number') {
+          // Check if Unix epoch in seconds (< 1e11) or milliseconds
+          expiresAt = new Date(rawExpiresAt > 1e11 ? rawExpiresAt : rawExpiresAt * 1000);
+        } else {
+          expiresAt = new Date(rawExpiresAt);
+        }
+      } else if (rawExpiresIn !== undefined && rawExpiresIn !== null && !isNaN(Number(rawExpiresIn))) {
+        const creationTs = raw.creation_timestamp || tokenObj.creation_timestamp;
+        if (creationTs && !isNaN(Number(creationTs))) {
+          const baseMs = Number(creationTs) > 1e11 ? Number(creationTs) : Number(creationTs) * 1000;
+          expiresAt = new Date(baseMs + Number(rawExpiresIn) * 1000);
+        } else {
+          expiresAt = new Date(Date.now() + Number(rawExpiresIn) * 1000);
+        }
+      }
+
+      if (!expiresAt || isNaN(expiresAt.getTime())) {
+        expiresAt = accessToken
+          ? new Date(Date.now() + 30 * 60 * 1000)
+          : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      }
+
+      // Check if access token is expired or expiring within 60 seconds
+      const now = new Date();
+      const isAccessExpired = !accessToken || (expiresAt.getTime() - now.getTime() < 60 * 1000);
+
+      if (isAccessExpired && refreshToken) {
+        console.log('[SCHWAB-IMPORT] Access token expired or missing, attempting refresh...');
+        try {
+          const refreshed = await schwabService.refreshAccessToken(refreshToken);
+          accessToken = refreshed.accessToken;
+          refreshToken = refreshed.refreshToken;
+          expiresAt = refreshed.expiresAt;
+          console.log('[SCHWAB-IMPORT] Refresh successful');
+        } catch (refreshErr) {
+          console.warn('[SCHWAB-IMPORT] Token refresh failed:', refreshErr.message);
+          if (!accessToken) {
+            return res.status(400).json({
+              success: false,
+              error: `Access token expired and refresh failed: ${refreshErr.response?.data?.error_description || refreshErr.message}`
+            });
+          }
+        }
+      }
+
+      // Validate access token with Schwab API and fetch account info
+      const axios = require('axios');
+      let accountsResponse;
+      try {
+        accountsResponse = await axios.get(
+          'https://api.schwabapi.com/trader/v1/accounts',
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`
+            }
+          }
+        );
+      } catch (apiErr) {
+        // If 401 and refresh token available, attempt refresh and retry
+        if (apiErr.response?.status === 401 && refreshToken) {
+          console.log('[SCHWAB-IMPORT] Token rejected with 401, trying refresh...');
+          try {
+            const refreshed = await schwabService.refreshAccessToken(refreshToken);
+            accessToken = refreshed.accessToken;
+            refreshToken = refreshed.refreshToken;
+            expiresAt = refreshed.expiresAt;
+
+            accountsResponse = await axios.get(
+              'https://api.schwabapi.com/trader/v1/accounts',
+              {
+                headers: {
+                  Authorization: `Bearer ${accessToken}`
+                }
+              }
+            );
+          } catch (retryErr) {
+            console.error('[SCHWAB-IMPORT] Retry failed after refresh:', retryErr.message);
+            return res.status(400).json({
+              success: false,
+              error: `Schwab rejected credentials: ${retryErr.response?.data?.message || retryErr.response?.data?.error || retryErr.message}`
+            });
+          }
+        } else {
+          console.error('[SCHWAB-IMPORT] Failed to fetch accounts from Schwab:', apiErr.message);
+          const errMsg = apiErr.response?.data?.message || apiErr.response?.data?.error || apiErr.message;
+          return res.status(400).json({
+            success: false,
+            error: `Schwab API error: ${errMsg}`
+          });
+        }
+      }
+
+      const accountNumber = accountsResponse.data?.[0]?.securitiesAccount?.accountNumber;
+      const schwabAccounts = (accountsResponse.data || [])
+        .map(account => redactAccountNumber(account?.securitiesAccount?.accountNumber))
+        .filter(Boolean)
+        .map(accountIdentifier => ({ account_identifier: accountIdentifier }));
+
+      console.log('[SCHWAB-IMPORT] Creating broker connection for user:', userId);
+      const connection = await BrokerConnection.create(userId, {
+        brokerType: 'schwab',
+        schwabAccessToken: accessToken,
+        schwabRefreshToken: refreshToken,
+        schwabTokenExpiresAt: expiresAt,
+        schwabAccountId: accountNumber,
+        brokerMetadata: {
+          schwab_accounts: schwabAccounts
+        },
+        accountLabel: accountLabel || null,
+        autoSyncEnabled,
+        syncFrequency,
+        syncTime,
+        syncStartDate
+      });
+
+      await BrokerConnection.updateStatus(connection.id, 'active', 'Token file imported successfully');
+      console.log('[SCHWAB-IMPORT] Connection status updated to active');
+
+      // Calculate next sync time if auto-sync enabled
+      if (autoSyncEnabled && syncFrequency !== 'manual') {
+        const userTimezone = await getUserTimezone(userId);
+        const nextSync = BrokerConnection.calculateNextSync(syncFrequency, syncTime, userTimezone);
+        if (nextSync) {
+          await BrokerConnection.update(connection.id, { nextScheduledSync: nextSync });
+        }
+      }
+
+      const updatedConnection = await BrokerConnection.findById(connection.id, false);
+
+      console.log(`[BROKER-SYNC] Schwab connection created via token import for user ${userId}`);
+
+      return res.status(201).json({
+        success: true,
+        data: updatedConnection,
+        message: 'Schwab tokens imported successfully'
+      });
+    } catch (error) {
+      logger.logError('Error importing Schwab tokens:', error);
+      next(error);
     }
   },
 

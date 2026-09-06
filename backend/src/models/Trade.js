@@ -232,7 +232,10 @@ class Trade {
     const pnl = aggregate.pnl;
     const pnlPercent = aggregate.pnl_percent;
     const computedEntryPrice = aggregate.entry_price != null ? aggregate.entry_price : entryPrice;
-    const computedExitPrice = aggregate.exit_price != null ? aggregate.exit_price : cleanExitPrice;
+    const computedExitPrice = aggregate.is_fully_closed
+      ? (aggregate.exit_price != null ? aggregate.exit_price : cleanExitPrice)
+      : null;
+    const computedExitTime = aggregate.is_fully_closed ? cleanExitTime : null;
     const computedQuantity = aggregate.quantity > 0 ? aggregate.quantity : quantity;
     const computedCommission = aggregate.commission;
     const computedFees = aggregate.fees;
@@ -248,7 +251,7 @@ class Trade {
     let finalTradeDate = tradeDate;
     if (!finalTradeDate) {
       // Extract date from timestamp (YYYY-MM-DD format)
-      const timestampToUse = cleanExitTime || finalEntryTime;
+      const timestampToUse = computedExitTime || finalEntryTime;
       if (timestampToUse instanceof Date) {
         finalTradeDate = timestampToUse.toISOString().split('T')[0];
       } else if (typeof timestampToUse === 'string') {
@@ -273,14 +276,14 @@ class Trade {
         const tempTrade = {
           symbol: symbol.toUpperCase(),
           entry_time: finalEntryTime,
-          exit_time: cleanExitTime,
+          exit_time: computedExitTime,
           entry_price: entryPrice,
-          exit_price: cleanExitPrice,
+          exit_price: computedExitPrice,
           quantity,
           side,
           pnl,
-          hold_time_minutes: cleanExitTime ? 
-            (new Date(cleanExitTime) - new Date(finalEntryTime)) / (1000 * 60) : null
+          hold_time_minutes: computedExitTime ? 
+            (new Date(computedExitTime) - new Date(finalEntryTime)) / (1000 * 60) : null
         };
 
         const basicClassification = await this.classifyTradeBasic(tempTrade);
@@ -294,7 +297,7 @@ class Trade {
         };
         
         // Mark for background processing if complete trade
-        if (cleanExitTime && cleanExitPrice) {
+        if (computedExitTime && computedExitPrice) {
           shouldQueueClassification = true;
         }
       } else {
@@ -302,19 +305,19 @@ class Trade {
         const tempTrade = {
           symbol: symbol.toUpperCase(),
           entry_time: finalEntryTime,
-          exit_time: cleanExitTime,
+          exit_time: computedExitTime,
           entry_price: entryPrice,
-          exit_price: cleanExitPrice,
+          exit_price: computedExitPrice,
           quantity,
           side,
           pnl,
-          hold_time_minutes: cleanExitTime ? 
-            (new Date(cleanExitTime) - new Date(finalEntryTime)) / (1000 * 60) : null
+          hold_time_minutes: computedExitTime ? 
+            (new Date(computedExitTime) - new Date(finalEntryTime)) / (1000 * 60) : null
         };
 
         try {
           // Use enhanced classification if trade is complete, otherwise basic classification
-          const classification = cleanExitTime && cleanExitPrice ? 
+          const classification = computedExitTime && computedExitPrice ? 
             await this.classifyTradeStrategyWithAnalysis(tempTrade, userId) :
             await this.classifyTradeBasic(tempTrade);
           
@@ -362,7 +365,7 @@ class Trade {
     };
 
     // Only check news for complete trades and if not skipping API calls
-    if (!options.skipApiCalls && cleanExitTime && cleanExitPrice) {
+    if (!options.skipApiCalls && computedExitTime && computedExitPrice) {
       try {
         newsData = await this.checkNewsForTrade({
           symbol: symbol.toUpperCase(),
@@ -525,8 +528,8 @@ class Trade {
 
     // Calculate R-Multiple if stop loss and exit price are provided
     // R-Multiple = Profit / Risk (where Risk = distance from entry to stop loss)
-    if (finalStopLoss && cleanExitPrice && entryPrice && side) {
-      rValue = this.calculateRValue(entryPrice, finalStopLoss, cleanExitPrice, side, {
+    if (finalStopLoss && computedExitPrice && entryPrice && side) {
+      rValue = this.calculateRValue(entryPrice, finalStopLoss, computedExitPrice, side, {
         quantity,
         commission,
         fees,
@@ -600,7 +603,7 @@ class Trade {
     `;
 
     const values = [
-      userId, symbol.toUpperCase(), finalTradeDate, finalEntryTime, cleanExitTime,
+      userId, symbol.toUpperCase(), finalTradeDate, finalEntryTime, computedExitTime,
       roundToDbPrecision(computedEntryPrice), roundToDbPrecision(computedExitPrice),
       roundToDbPrecision(computedQuantity), side,
       roundToDbPrecision(computedCommission) || 0, roundToDbPrecision(entryCommission) || 0, roundToDbPrecision(exitCommission) || 0,

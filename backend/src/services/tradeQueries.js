@@ -679,7 +679,6 @@ class TradeQueries {
           SUM(${derivedRValue}) as r_value
         FROM trades t
         ${whereClause}
-          AND exit_price IS NOT NULL
           AND pnl IS NOT NULL
         GROUP BY ${POSITION_GROUP_KEY}
       )`
@@ -701,7 +700,6 @@ class TradeQueries {
           ${derivedRValue} as r_value
         FROM trades t
         ${whereClause}
-          AND exit_price IS NOT NULL
           AND pnl IS NOT NULL
       )`;
 
@@ -846,7 +844,6 @@ class TradeQueries {
             SUM(quantity) as volume
           FROM trades t
           ${whereClause}
-            AND exit_price IS NOT NULL
             AND pnl IS NOT NULL
           GROUP BY COALESCE(NULLIF(underlying_symbol, ''), symbol), ${POSITION_GROUP_KEY}
         )
@@ -876,7 +873,6 @@ class TradeQueries {
           SUM(quantity) as total_volume
         FROM trades t
         ${whereClause}
-          AND exit_price IS NOT NULL
           AND pnl IS NOT NULL
         GROUP BY symbol
         ORDER BY total_pnl DESC
@@ -981,7 +977,6 @@ class TradeQueries {
             COUNT(*) as actual_leg_count
           FROM trades t
           ${whereClause}
-            AND exit_price IS NOT NULL
             AND pnl IS NOT NULL
           GROUP BY ${POSITION_GROUP_KEY}
         )
@@ -1039,7 +1034,6 @@ class TradeQueries {
             MIN(trade_date) as trade_date
           FROM trades t
           ${whereClause}
-            AND exit_price IS NOT NULL
             AND pnl IS NOT NULL
           GROUP BY ${POSITION_GROUP_KEY}
         )
@@ -1085,7 +1079,6 @@ class TradeQueries {
           FROM trades t
           ${whereClause}
             AND pnl IS NOT NULL
-            AND exit_price IS NOT NULL
           ORDER BY exit_time DESC NULLS LAST,
                    trade_date DESC,
                    entry_time DESC NULLS LAST

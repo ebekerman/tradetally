@@ -17,6 +17,8 @@ const BrokerConnection = require('../../models/BrokerConnection');
 const AnalyticsCache = require('../analyticsCache');
 const OptionStrategyGroupingService = require('../optionStrategyGroupingService');
 const db = require('../../config/database');
+const { getUserTimezone } = require('../../utils/timezone');
+const { computeTradePnl } = require('../pnlEngine');
 
 const SCHWAB_API_BASE = 'https://api.schwabapi.com/trader/v1';
 const TOKEN_REFRESH_BUFFER = 5 * 60 * 1000; // Refresh 5 minutes before expiration
@@ -535,6 +537,7 @@ class SchwabService {
     // Track round-trip IDs per account/instrument - increments each time that
     // specific account position goes flat and then re-opens.
     const roundTripCounters = {};
+    const roundTripOpeningLots = new Map();
 
     // Sort all transactions by time
     const sorted = [...transactions].sort((a, b) => this._compareTransactionsForMatching(a, b));
@@ -577,9 +580,10 @@ class SchwabService {
         if (openPositions[positionKey].length === 0) {
           roundTripCounters[positionKey] = (roundTripCounters[positionKey] || 0) + 1;
         }
-        openPositions[positionKey].push({
+        const lot = {
           symbol,
           qty: tx.quantity,
+          originalQty: tx.quantity,
           price: tx.price,
           time: tx.time,
           commission: tx.commission || 0,
@@ -594,8 +598,16 @@ class SchwabService {
           cusip: tx.cusip,
           orderId: tx.orderId,
           accountIdentifier: tx.accountIdentifier,
-          roundTripId: roundTripCounters[positionKey]
-        });
+          roundTripId: roundTripCounters[positionKey],
+          positionKey
+        };
+        openPositions[positionKey].push(lot);
+
+        const rtKey = `${positionKey}|${roundTripCounters[positionKey]}`;
+        if (!roundTripOpeningLots.has(rtKey)) {
+          roundTripOpeningLots.set(rtKey, []);
+        }
+        roundTripOpeningLots.get(rtKey).push({ ...lot });
       } else if (positionEffect === 'CLOSING') {
         // Match against open positions using FIFO
         if (!openPositions[positionKey] || openPositions[positionKey].length === 0) {
@@ -623,6 +635,7 @@ class SchwabService {
             cusip: tx.cusip,
             accountIdentifier: tx.accountIdentifier,
             roundTripId: 0, // No matching open - unique round-trip
+            positionKey,
             executionData: [{
               datetime: tx.time,
               price: tx.price,
@@ -673,6 +686,7 @@ class SchwabService {
             cusip: openPos.cusip,
             accountIdentifier: openPos.accountIdentifier,
             roundTripId: openPos.roundTripId,
+            positionKey,
             executionData: [
               {
                 datetime: openPos.time,
@@ -705,51 +719,140 @@ class SchwabService {
       }
     }
 
-    // Add remaining open positions as open trades
+    // Identify which round-trips are still open (have remaining open quantity > 0)
+    const openRoundTripKeys = new Set();
+    const openRoundTripRemainingLots = new Map();
+
     for (const [positionKey, positions] of Object.entries(openPositions)) {
       for (const pos of positions) {
         if (pos.qty > 0) {
-          console.log(`[SCHWAB] Remaining open position: ${positionKey} qty=${pos.qty} side=${pos.side} time=${pos.time}`);
-          rawTrades.push({
-            symbol: pos.symbol,
-            side: pos.side,
-            quantity: pos.qty,
-            entryPrice: pos.price,
-            exitPrice: null,
-            entryTime: pos.time,
-            exitTime: null,
-            tradeDate: pos.time.split('T')[0],
-            commission: pos.commission,
-            fees: pos.fees,
-            pnl: null,
-            broker: 'schwab',
-            instrumentType: pos.instrumentType,
-            optionType: pos.optionType,
-            strikePrice: pos.strikePrice,
-            expirationDate: pos.expirationDate,
-            underlyingSymbol: pos.underlyingSymbol,
-            matchingSymbol: pos.matchingSymbol,
-            cusip: pos.cusip,
-            accountIdentifier: pos.accountIdentifier,
-            roundTripId: pos.roundTripId,
-            executionData: [{
-              datetime: pos.time,
-              price: pos.price,
-              quantity: pos.qty,
-              side: pos.side,
-              type: 'entry',
-              orderId: pos.orderId
-            }]
-          });
+          const rtKey = `${positionKey}|${pos.roundTripId}`;
+          openRoundTripKeys.add(rtKey);
+          if (!openRoundTripRemainingLots.has(rtKey)) {
+            openRoundTripRemainingLots.set(rtKey, []);
+          }
+          openRoundTripRemainingLots.get(rtKey).push(pos);
         }
       }
     }
 
+    const finalRawTrades = [];
+    const partialExitsByRoundTrip = new Map();
+
+    for (const trade of rawTrades) {
+      const rtKey = `${trade.positionKey || trade.symbol}|${trade.roundTripId || 0}`;
+      if (trade.roundTripId && openRoundTripKeys.has(rtKey)) {
+        // This matched trade belongs to a round-trip that is STILL OPEN.
+        // Do NOT emit it as a separate closed trade.
+        // Collect it as a partial exit for this open round trip.
+        if (!partialExitsByRoundTrip.has(rtKey)) {
+          partialExitsByRoundTrip.set(rtKey, []);
+        }
+        partialExitsByRoundTrip.get(rtKey).push(trade);
+      } else {
+        // Round trip is fully closed or orphan closing
+        finalRawTrades.push(trade);
+      }
+    }
+
+    // Add remaining open positions as single open trades (consolidating entries & partial exits)
+    for (const [rtKey, remainingLots] of openRoundTripRemainingLots.entries()) {
+      const openingLots = roundTripOpeningLots.get(rtKey) || remainingLots;
+      const partialExits = partialExitsByRoundTrip.get(rtKey) || [];
+
+      const firstLot = openingLots[0] || remainingLots[0];
+      const remainingQty = remainingLots.reduce((sum, lot) => sum + lot.qty, 0);
+
+      // Aggregate opening executions and calculate weighted average entry price
+      let totalEntryQty = 0;
+      let totalEntryValue = 0;
+      let totalCommission = 0;
+      let totalFees = 0;
+      let earliestEntryTime = null;
+
+      const executionData = [];
+
+      for (const lot of openingLots) {
+        const qty = lot.originalQty || lot.qty;
+        totalEntryQty += qty;
+        totalEntryValue += lot.price * qty;
+        totalCommission += lot.commission || 0;
+        totalFees += lot.fees || 0;
+        if (!earliestEntryTime || new Date(lot.time) < new Date(earliestEntryTime)) {
+          earliestEntryTime = lot.time;
+        }
+        executionData.push({
+          datetime: lot.time,
+          price: lot.price,
+          quantity: qty,
+          side: lot.side,
+          type: 'entry',
+          orderId: lot.orderId
+        });
+      }
+
+      const avgEntryPrice = totalEntryQty > 0 ? totalEntryValue / totalEntryQty : firstLot.price;
+
+      // Aggregate partial exits: realized PnL, exit fees, and exit executions
+      let totalRealizedPnl = 0;
+      const hasPartialExit = partialExits.length > 0;
+      const seenExitKeys = new Map();
+
+      for (const exitTrade of partialExits) {
+        if (exitTrade.pnl != null) {
+          totalRealizedPnl += exitTrade.pnl;
+        }
+        totalFees += exitTrade.fees || 0;
+
+        const exitExec = exitTrade.executionData?.find(e => e.type === 'exit');
+        if (exitExec) {
+          const key = `${exitExec.orderId}|${exitExec.datetime}|${exitExec.price}`;
+          if (seenExitKeys.has(key)) {
+            seenExitKeys.get(key).quantity += exitExec.quantity;
+          } else {
+            seenExitKeys.set(key, { ...exitExec });
+          }
+        }
+      }
+
+      for (const exitExec of seenExitKeys.values()) {
+        executionData.push(exitExec);
+      }
+
+      const openTrade = {
+        symbol: firstLot.symbol,
+        side: firstLot.side,
+        quantity: remainingQty,
+        entryPrice: Math.round(avgEntryPrice * 10000) / 10000,
+        exitPrice: null,
+        entryTime: earliestEntryTime,
+        exitTime: null,
+        tradeDate: earliestEntryTime ? earliestEntryTime.split('T')[0] : firstLot.time.split('T')[0],
+        commission: Math.round(totalCommission * 100) / 100,
+        fees: Math.round(totalFees * 100) / 100,
+        pnl: hasPartialExit ? Math.round(totalRealizedPnl * 100) / 100 : null,
+        broker: 'schwab',
+        instrumentType: firstLot.instrumentType,
+        optionType: firstLot.optionType,
+        strikePrice: firstLot.strikePrice,
+        expirationDate: firstLot.expirationDate,
+        underlyingSymbol: firstLot.underlyingSymbol,
+        matchingSymbol: firstLot.matchingSymbol,
+        cusip: firstLot.cusip,
+        accountIdentifier: firstLot.accountIdentifier,
+        roundTripId: firstLot.roundTripId,
+        executionData
+      };
+
+      console.log(`[SCHWAB] Emitting single open trade for ${rtKey}: qty=${remainingQty}, entryPrice=${openTrade.entryPrice}, partial exits=${partialExits.length}, pnl=${openTrade.pnl}`);
+      finalRawTrades.push(openTrade);
+    }
+
     // Log raw trades before grouping
-    console.log(`[SCHWAB] Raw matched trades: ${rawTrades.length}`);
+    console.log(`[SCHWAB] Raw matched trades: ${finalRawTrades.length}`);
 
     // Group trades by symbol and trade date (exit date for closed, entry date for open)
-    const trades = this.groupTrades(rawTrades);
+    const trades = this.groupTrades(finalRawTrades);
 
     // Log summary
     const closedTrades = trades.filter(t => t.exitPrice !== null).length;
@@ -767,8 +870,10 @@ class SchwabService {
     const groupedMap = new Map();
 
     for (const trade of rawTrades) {
-      // Create group key: symbol + trade date + side + account + round-trip
-      // roundTripId ensures separate round-trips (position went flat then re-opened) are not merged
+      // Create group key:
+      // For round trips (roundTripId > 0), group all executions of the round trip together.
+      // Do NOT split by tradeDate so multi-day scale-outs remain a single trade.
+      // For orphan closing trades without matching open (roundTripId === 0), group by date/time.
       const instrumentKey = trade.instrumentType === 'option'
         ? [
             trade.matchingSymbol || trade.symbol,
@@ -777,7 +882,9 @@ class SchwabService {
             trade.strikePrice ?? ''
           ].join('|')
         : (trade.matchingSymbol || trade.symbol);
-      const key = `${instrumentKey}|${trade.tradeDate}|${trade.side}|${trade.accountIdentifier || 'default'}|${trade.roundTripId || 0}`;
+      const key = (trade.roundTripId && trade.roundTripId > 0)
+        ? `${instrumentKey}|${trade.side}|${trade.accountIdentifier || 'default'}|${trade.roundTripId}`
+        : `${instrumentKey}|${trade.tradeDate}|${trade.side}|${trade.accountIdentifier || 'default'}|0|${trade.exitTime || trade.entryTime || ''}`;
 
       if (!groupedMap.has(key)) {
         groupedMap.set(key, {
@@ -792,6 +899,7 @@ class SchwabService {
           underlyingSymbol: trade.underlyingSymbol,
           cusip: trade.cusip,
           accountIdentifier: trade.accountIdentifier,
+          roundTripId: trade.roundTripId,
           // Aggregation fields
           totalQuantity: 0,
           totalEntryValue: 0,
@@ -856,6 +964,33 @@ class SchwabService {
         pnl = this.calculatePnL(entryPrice, exitPrice, group.totalQuantity, group.side, group.instrumentType);
       }
 
+      // Determine tradeDate: for closed trades, prefer latest exit date; otherwise earliest entry date
+      let tradeDate = group.tradeDate;
+      if (group.latestExitTime) {
+        tradeDate = group.latestExitTime.split('T')[0];
+      } else if (group.earliestEntryTime) {
+        tradeDate = group.earliestEntryTime.split('T')[0];
+      }
+
+      // Deduplicate/consolidate execution entries that were split across matching slices
+      const consolidatedExecutions = [];
+      const execMap = new Map();
+      for (const exec of group.executionData) {
+        const execKey = `${exec.type}|${exec.orderId || ''}|${exec.datetime || ''}|${exec.price}`;
+        if (execMap.has(execKey)) {
+          const existing = execMap.get(execKey);
+          existing.quantity += exec.quantity;
+          if (exec.fees) existing.fees = (existing.fees || 0) + exec.fees;
+          if (exec.commission) existing.commission = (existing.commission || 0) + exec.commission;
+          if (exec.realized_pnl != null) existing.realized_pnl = (existing.realized_pnl || 0) + exec.realized_pnl;
+          if (exec.gross_realized_pnl != null) existing.gross_realized_pnl = (existing.gross_realized_pnl || 0) + exec.gross_realized_pnl;
+        } else {
+          const cloned = { ...exec };
+          execMap.set(execKey, cloned);
+          consolidatedExecutions.push(cloned);
+        }
+      }
+
       groupedTrades.push({
         symbol: group.symbol,
         side: group.side,
@@ -864,7 +999,7 @@ class SchwabService {
         exitPrice,
         entryTime: group.earliestEntryTime,
         exitTime: group.latestExitTime,
-        tradeDate: group.tradeDate,
+        tradeDate,
         commission: Math.round(group.totalCommission * 100) / 100,
         fees: Math.round(group.totalFees * 100) / 100,
         pnl: pnl !== null ? Math.round(pnl * 100) / 100 : null,
@@ -876,7 +1011,8 @@ class SchwabService {
         underlyingSymbol: group.underlyingSymbol,
         cusip: group.cusip,
         accountIdentifier: group.accountIdentifier,
-        executionData: group.executionData
+        roundTripId: group.roundTripId,
+        executionData: consolidatedExecutions
       });
     }
 
@@ -1087,6 +1223,23 @@ class SchwabService {
 
     console.log(`[SCHWAB] Starting sync for connection ${connection.id}`);
 
+    // Resolve starting date floor from connection.syncStartDate
+    const connectionStartFloor = connection.syncStartDate
+      ? this._extractDateString(connection.syncStartDate)
+      : null;
+
+    // Use connection's syncStartDate as a hard floor:
+    // If startDate is passed, but earlier than connectionStartFloor, clamp to connectionStartFloor.
+    // If startDate is not passed, use connectionStartFloor.
+    let effectiveStartDate = startDate || connectionStartFloor;
+    if (startDate && connectionStartFloor && startDate < connectionStartFloor) {
+      effectiveStartDate = connectionStartFloor;
+    }
+
+    if (effectiveStartDate) {
+      console.log(`[SCHWAB] Sync starting date floor enforced: ${effectiveStartDate}`);
+    }
+
     // Ensure we have a valid token
     const { accessToken, needsReauth } = await this.ensureValidToken(connection);
 
@@ -1132,7 +1285,7 @@ class SchwabService {
         const transactions = await this.getTransactions(
           accessToken,
           account.hashValue,
-          startDate,
+          effectiveStartDate || undefined,
           endDate
         );
         // Tag each transaction with the redacted account identifier
@@ -1158,8 +1311,22 @@ class SchwabService {
     }
 
     // Parse transactions to trades
-    const trades = this.parseTransactions(allTransactions);
+    let trades = this.parseTransactions(allTransactions);
     console.log(`[SCHWAB] Parsed ${trades.length} trades from ${allTransactions.length} transactions`);
+
+    // Enforce starting date: ignore any trades occurring before effectiveStartDate
+    if (effectiveStartDate) {
+      const originalCount = trades.length;
+      trades = trades.filter(trade => {
+        const tradeDateStr = this._extractDateString(trade.tradeDate || trade.entryTime || trade.exitTime);
+        if (!tradeDateStr) return true;
+        return tradeDateStr >= effectiveStartDate;
+      });
+      const ignoredCount = originalCount - trades.length;
+      if (ignoredCount > 0) {
+        console.log(`[SCHWAB] Ignored ${ignoredCount} trades occurring before starting date ${effectiveStartDate}`);
+      }
+    }
 
     // Log trade breakdown for debugging TOS issues
     const tradeBreakdown = {
@@ -1178,7 +1345,9 @@ class SchwabService {
     }
 
     // Import trades with connection ID for tracking
-    const result = await this.importTrades(connection.userId, connection.id, trades);
+    const result = effectiveStartDate
+      ? await this.importTrades(connection.userId, connection.id, trades, { startDate: effectiveStartDate })
+      : await this.importTrades(connection.userId, connection.id, trades);
 
     console.log(`[SCHWAB] Sync complete: ${result.imported} imported, ${result.duplicates} duplicates`);
 
@@ -1190,22 +1359,110 @@ class SchwabService {
    * @param {string} userId - User ID
    * @param {string} connectionId - Broker connection ID for tracking synced trades
    * @param {Array} trades - Parsed trades
+   * @param {object} [options] - Additional import options (e.g. startDate floor)
    */
-  async importTrades(userId, connectionId, trades) {
+  async importTrades(userId, connectionId, trades, options = {}) {
     let imported = 0;
     let skipped = 0;
     let failed = 0;
     let duplicates = 0;
 
-    const existingTrades = await this.getExistingTrades(userId, trades);
+    const startDateFloor = options.startDate ? this._extractDateString(options.startDate) : null;
+    let filteredTrades = trades;
+    if (startDateFloor) {
+      filteredTrades = trades.filter(t => {
+        const dateStr = this._extractDateString(t.tradeDate || t.entryTime || t.exitTime);
+        return !dateStr || dateStr >= startDateFloor;
+      });
+      skipped += (trades.length - filteredTrades.length);
+    }
 
-    for (const tradeData of trades) {
+    const existingTrades = await this.getExistingTrades(userId, filteredTrades);
+
+    for (const tradeData of filteredTrades) {
       try {
-        // Check for duplicates
+        // Check for duplicates or trade updates
         const isDuplicate = this.isDuplicateTrade(tradeData, existingTrades);
 
         if (isDuplicate) {
           duplicates++;
+          continue;
+        }
+
+        if (tradeData.isUpdate && tradeData.existingTradeId) {
+          console.log(`[SCHWAB] Updating existing trade ${tradeData.existingTradeId} with additional executions for ${tradeData.symbol}`);
+
+          const userTimezone = await getUserTimezone(userId);
+          const engineResult = computeTradePnl({
+            side: tradeData.side,
+            instrumentType: tradeData.instrumentType || 'stock',
+            contractSize: tradeData.contractSize || (tradeData.instrumentType === 'option' ? 100 : null),
+            pointValue: tradeData.pointValue || null,
+            fallbackCommission: tradeData.commission != null ? tradeData.commission : null,
+            fallbackFees: tradeData.fees != null ? tradeData.fees : null,
+            executions: tradeData.executionData || [],
+            timezone: userTimezone,
+            tradeId: tradeData.existingTradeId
+          });
+
+          const agg = engineResult.aggregate;
+          const annotatedExecs = engineResult.annotatedExecutions;
+
+          const updateQuery = `
+            UPDATE trades
+            SET executions = $1::jsonb,
+                entry_price = $2,
+                exit_price = $3,
+                entry_time = $4,
+                exit_time = $5,
+                trade_date = $6,
+                pnl = $7,
+                pnl_percent = $8,
+                quantity = $9,
+                commission = $10,
+                fees = $11,
+                updated_at = NOW()
+            WHERE id = $12 AND user_id = $13
+          `;
+
+          await db.query(updateQuery, [
+            JSON.stringify(annotatedExecs),
+            agg.entry_price != null ? Math.round(agg.entry_price * 1000000) / 1000000 : tradeData.entryPrice,
+            agg.is_fully_closed && agg.exit_price != null ? Math.round(agg.exit_price * 1000000) / 1000000 : null,
+            agg.entry_time || tradeData.entryTime,
+            agg.is_fully_closed ? agg.exit_time : null,
+            agg.trade_date || tradeData.tradeDate,
+            agg.pnl != null ? Math.round(agg.pnl * 1000000) / 1000000 : null,
+            agg.pnl_percent != null ? Math.round(agg.pnl_percent * 1000000) / 1000000 : null,
+            Math.round(agg.quantity * 1000000) / 1000000,
+            Math.round(agg.commission * 1000000) / 1000000,
+            Math.round(agg.fees * 1000000) / 1000000,
+            tradeData.existingTradeId,
+            userId
+          ]);
+
+          // Clean up any legacy split closed trades that shared an entry order ID with this trade
+          if (tradeData.executionData?.some(e => e.type === 'entry' && e.orderId)) {
+            const entryOrderIds = tradeData.executionData
+              .filter(e => e.type === 'entry' && e.orderId)
+              .map(e => String(e.orderId));
+            
+            for (const existing of existingTrades) {
+              if (existing.id !== tradeData.existingTradeId && existing.exit_time != null) {
+                let exExecs = existing.executions;
+                if (typeof exExecs === 'string') {
+                  try { exExecs = JSON.parse(exExecs); } catch { exExecs = []; }
+                }
+                const hasMatchingEntry = exExecs?.some(e => e.type === 'entry' && e.orderId && entryOrderIds.includes(String(e.orderId)));
+                if (hasMatchingEntry) {
+                  console.log(`[SCHWAB] Removing legacy split closed trade ${existing.id} for ${tradeData.symbol} (merged into ${tradeData.existingTradeId})`);
+                  await db.query(`DELETE FROM trades WHERE id = $1 AND user_id = $2`, [existing.id, userId]);
+                }
+              }
+            }
+          }
+
+          imported++;
           continue;
         }
 
@@ -1281,7 +1538,7 @@ class SchwabService {
     const params = [userId];
 
     let query = `
-      SELECT symbol, side, quantity, entry_price, exit_price, entry_time, exit_time,
+      SELECT id, symbol, side, quantity, entry_price, exit_price, entry_time, exit_time,
              executions, trade_date, pnl, instrument_type, strike_price,
              expiration_date, option_type, underlying_symbol, account_identifier
       FROM trades
@@ -1376,6 +1633,36 @@ class SchwabService {
         const hasExitMatch = existingExecs.some(exec =>
           exec.orderId && exec.datetime && exec.type === 'exit' && newExitExecKeys.has(`${exec.orderId}|${exec.datetime}`)
         );
+
+        // Check if existing trade matches the entry executions of the new trade
+        const newEntryExecs = newTrade.executionData.filter(e => e.type === 'entry');
+        const existingEntryExecs = existingExecs.filter(e => e.type === 'entry');
+
+        const hasEntryMatch = newEntryExecs.some(newEntry =>
+          existingEntryExecs.some(exEntry =>
+            (newEntry.orderId && exEntry.orderId && String(newEntry.orderId) === String(exEntry.orderId)) ||
+            (newEntry.datetime && exEntry.datetime && Math.abs(new Date(newEntry.datetime) - new Date(exEntry.datetime)) < 1000)
+          )
+        );
+
+        if (hasEntryMatch) {
+          const newExitExecs = newTrade.executionData.filter(e => e.type === 'exit');
+          const existingExitExecs = existingExecs.filter(e => e.type === 'exit');
+
+          if (
+            newTrade.executionData.length > existingExecs.length ||
+            newExitExecs.length > existingExitExecs.length ||
+            (newTrade.exitPrice != null && !existing.exit_price)
+          ) {
+            console.log(`[SCHWAB] Trade ${symbol} has new/updated executions vs existing trade ${existing.id} - marked for UPDATE`);
+            newTrade.isUpdate = true;
+            newTrade.existingTradeId = existing.id;
+            return false;
+          } else if (newTrade.executionData.length === existingExecs.length && Math.abs((parseFloat(existing.quantity) || 0) - newQty) < 0.001) {
+            console.log(`[SCHWAB] Duplicate found by matching entry + execution count: ${symbol}`);
+            return true;
+          }
+        }
 
         if (hasExitMatch) {
           console.log(`[SCHWAB] Duplicate found by exit order ID + datetime: ${symbol}`);

@@ -68,6 +68,13 @@
               Delete All Trades
             </button>
             <button
+              v-if="connection.brokerType === 'schwab'"
+              @click="emit('updateTokens', connection); showMenu = false"
+              class="w-full px-4 py-2 text-left text-sm text-primary-600 dark:text-primary-400 hover:bg-gray-100 dark:hover:bg-gray-700"
+            >
+              Update / Import Tokens
+            </button>
+            <button
               @click="emit('delete', connection); showMenu = false"
               class="w-full px-4 py-2 text-left text-sm text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700 last:rounded-b-lg"
             >
@@ -113,6 +120,21 @@
         >
           {{ connection.lastErrorMessage }}
         </div>
+
+        <!-- Schwab Expired Token Alert & Quick Re-import -->
+        <div
+          v-if="connection.brokerType === 'schwab' && connection.connectionStatus === 'expired'"
+          class="mt-2 p-2.5 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded flex items-center justify-between text-xs text-yellow-800 dark:text-yellow-300"
+        >
+          <span>Schwab token expired. Please import a new token file.</span>
+          <button
+            type="button"
+            class="ml-2 font-medium underline hover:text-yellow-900 dark:hover:text-yellow-100 flex-shrink-0"
+            @click="emit('updateTokens', connection)"
+          >
+            Import Tokens
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -135,7 +157,7 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['sync', 'test', 'settings', 'delete', 'deleteTrades'])
+const emit = defineEmits(['sync', 'test', 'settings', 'delete', 'deleteTrades', 'updateTokens'])
 
 const store = useBrokerSyncStore()
 const { formatDateTime: formatDateTimeTz } = useUserTimezone()

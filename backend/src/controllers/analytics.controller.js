@@ -549,17 +549,15 @@ const analyticsController = {
                   SUM(COALESCE(quantity, 0)) as quantity
               FROM trades t
               WHERE t.user_id = $1 ${filterConditions}
-                  AND exit_price IS NOT NULL
                   AND pnl IS NOT NULL
               GROUP BY ${POSITION_GROUP_KEY}
           )`
           : `completed_trades AS (
-              -- Each trade with both entry and exit price is a complete round trip
+              -- Each trade with realized P&L contributes to completed trade statistics
               SELECT
                   *
               FROM trades t
               WHERE t.user_id = $1 ${filterConditions}
-                  AND exit_price IS NOT NULL
                   AND pnl IS NOT NULL
           )`;
 

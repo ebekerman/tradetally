@@ -23,7 +23,8 @@ jest.mock('../../src/controllers/brokerSync.controller', () => ({
   triggerSync: jest.fn(),
   testConnection: jest.fn(),
   deleteBrokerTrades: jest.fn(),
-  getSyncStatus: jest.fn()
+  getSyncStatus: jest.fn(),
+  importSchwabTokens: jest.fn()
 }));
 
 const express = require('express');

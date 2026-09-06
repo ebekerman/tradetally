@@ -82,18 +82,35 @@ export const useBrokerSyncStore = defineStore('brokerSync', () => {
     }
   }
 
-  async function initSchwabOAuth() {
+  async function initSchwabOAuth(options = {}) {
     loading.value = true
     error.value = null
 
     try {
-      const response = await api.post('/broker-sync/connections/schwab/init')
+      const response = await api.post('/broker-sync/connections/schwab/init', options)
 
       // Return the auth URL to redirect the user
       return response.data.authUrl
     } catch (err) {
       console.error('[BROKER-SYNC] Failed to init Schwab OAuth:', err)
       error.value = err.response?.data?.error || 'Failed to initiate Schwab connection'
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function importSchwabTokens(payload) {
+    loading.value = true
+    error.value = null
+
+    try {
+      const response = await api.post('/broker-sync/connections/schwab/import-tokens', payload)
+      await fetchConnections()
+      return response.data.data
+    } catch (err) {
+      console.error('[BROKER-SYNC] Failed to import Schwab tokens:', err)
+      error.value = err.response?.data?.error || 'Failed to import Schwab tokens'
       throw err
     } finally {
       loading.value = false
@@ -328,6 +345,7 @@ export const useBrokerSyncStore = defineStore('brokerSync', () => {
     addIBKRConnection,
     addTrading212Connection,
     initSchwabOAuth,
+    importSchwabTokens,
     initBrokerOAuth,
     updateConnection,
     fetchConnectionAccounts,

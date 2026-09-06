@@ -389,10 +389,7 @@ describe('Schwab parseTransactions (full payload -> trades)', () => {
     ]);
   });
 
-  test('partial exits split the entry commission pro rata without double counting', () => {
-    // Regression: the entry commission was prorated against the lot's
-    // REMAINING quantity without being consumed, so a 50/50 split of a
-    // 100-share lot ($1.00 entry commission) attributed $0.50 + $1.00 = $1.50.
+  test('partial exits across multiple dates consolidate into a single trade with exact total commission and executions', () => {
     const trades = schwabService.parseTransactions([
       schwabEquityTx({
         orderId: 1006300000001,
@@ -425,11 +422,68 @@ describe('Schwab parseTransactions (full payload -> trades)', () => {
     ]);
 
     const closedTrades = trades.filter(t => t.exitPrice != null);
-    expect(closedTrades).toHaveLength(2);
-    expect(closedTrades[0].commission).toBeCloseTo(0.5, 10);
-    expect(closedTrades[1].commission).toBeCloseTo(0.5, 10);
-    const totalEntryCommission = closedTrades.reduce((sum, t) => sum + t.commission, 0);
-    expect(totalEntryCommission).toBeCloseTo(1.0, 10);
+    expect(closedTrades).toHaveLength(1);
+    expect(closedTrades[0].quantity).toBe(100);
+    expect(closedTrades[0].entryPrice).toBe(100);
+    expect(closedTrades[0].exitPrice).toBe(101.5);
+    expect(closedTrades[0].commission).toBeCloseTo(1.0, 10);
+    expect(closedTrades[0].executionData).toHaveLength(3);
+    expect(closedTrades[0].executionData[0].quantity).toBe(100);
+    expect(closedTrades[0].executionData[1].quantity).toBe(50);
+    expect(closedTrades[0].executionData[2].quantity).toBe(50);
+  });
+
+  test('open position with partial close produces a single open trade with net quantity and executions', () => {
+    const trades = schwabService.parseTransactions([
+      schwabEquityTx({
+        orderId: 1007798045582,
+        time: '2026-09-02T14:53:13Z',
+        symbol: 'LIFE',
+        price: 35.99,
+        amount: 50,
+        positionEffect: 'OPENING',
+        netAmount: -1799.50
+      }),
+      schwabEquityTx({
+        orderId: 1007813456055,
+        time: '2026-09-03T14:30:21Z',
+        symbol: 'LIFE',
+        price: 38.83,
+        amount: -25,
+        positionEffect: 'CLOSING',
+        netAmount: 970.75
+      })
+    ]);
+
+    expect(trades).toHaveLength(1);
+    const trade = trades[0];
+    expect(trade.symbol).toBe('LIFE');
+    expect(trade.side).toBe('long');
+    expect(trade.quantity).toBe(25); // Net remaining position
+    expect(trade.entryPrice).toBe(35.99);
+    expect(trade.exitPrice).toBeNull();
+    expect(trade.exitTime).toBeNull();
+    expect(trade.tradeDate).toBe('2026-09-02');
+    expect(trade.pnl).toBeCloseTo(71.0, 2); // (38.83 - 35.99) * 25
+    expect(trade.executionData).toHaveLength(2);
+    expect(trade.executionData).toEqual([
+      {
+        datetime: '2026-09-02T14:53:13Z',
+        price: 35.99,
+        quantity: 50,
+        side: 'long',
+        type: 'entry',
+        orderId: '1007798045582'
+      },
+      {
+        datetime: '2026-09-03T14:30:21Z',
+        price: 38.83,
+        quantity: 25,
+        side: 'short',
+        type: 'exit',
+        orderId: '1007813456055'
+      }
+    ]);
   });
 
   test('same-symbol positions and exits are matched within their Schwab account', () => {
@@ -793,5 +847,90 @@ describe('Schwab dedupe key construction (exit orderId|datetime)', () => {
     otherAccount.account_identifier = '****9999';
 
     expect(schwabService.isDuplicateTrade(trade, [otherAccount])).toBe(false);
+  });
+
+  test('existing open trade receives partial exit: marked as update, not duplicate', () => {
+    const existingOpen = {
+      id: 'existing-trade-123',
+      symbol: 'LIFE',
+      side: 'long',
+      quantity: 50,
+      entry_price: 35.99,
+      exit_price: null,
+      entry_time: '2026-09-02T14:53:13Z',
+      exit_time: null,
+      trade_date: '2026-09-02',
+      pnl: null,
+      instrument_type: 'stock',
+      account_identifier: '****1234',
+      executions: [
+        { datetime: '2026-09-02T14:53:13Z', price: 35.99, quantity: 50, side: 'long', type: 'entry', orderId: '1007798045582' }
+      ]
+    };
+
+    const incomingWithPartialExit = {
+      symbol: 'LIFE',
+      side: 'long',
+      quantity: 25,
+      entryPrice: 35.99,
+      exitPrice: null,
+      entryTime: '2026-09-02T14:53:13Z',
+      exitTime: null,
+      tradeDate: '2026-09-02',
+      pnl: 71.0,
+      instrumentType: 'stock',
+      accountIdentifier: '****1234',
+      executionData: [
+        { datetime: '2026-09-02T14:53:13Z', price: 35.99, quantity: 50, side: 'long', type: 'entry', orderId: '1007798045582' },
+        { datetime: '2026-09-03T14:30:21Z', price: 38.83, quantity: 25, side: 'short', type: 'exit', orderId: '1007813456055' }
+      ]
+    };
+
+    const isDup = schwabService.isDuplicateTrade(incomingWithPartialExit, [existingOpen]);
+    expect(isDup).toBe(false);
+    expect(incomingWithPartialExit.isUpdate).toBe(true);
+    expect(incomingWithPartialExit.existingTradeId).toBe('existing-trade-123');
+  });
+
+  test('re-sync of identical open trade with same executions is considered a duplicate', () => {
+    const existingOpen = {
+      id: 'existing-trade-123',
+      symbol: 'LIFE',
+      side: 'long',
+      quantity: 25,
+      entry_price: 35.99,
+      exit_price: null,
+      entry_time: '2026-09-02T14:53:13Z',
+      exit_time: null,
+      trade_date: '2026-09-02',
+      pnl: 71.0,
+      instrument_type: 'stock',
+      account_identifier: '****1234',
+      executions: [
+        { datetime: '2026-09-02T14:53:13Z', price: 35.99, quantity: 50, side: 'long', type: 'entry', orderId: '1007798045582' },
+        { datetime: '2026-09-03T14:30:21Z', price: 38.83, quantity: 25, side: 'short', type: 'exit', orderId: '1007813456055' }
+      ]
+    };
+
+    const incomingIdentical = {
+      symbol: 'LIFE',
+      side: 'long',
+      quantity: 25,
+      entryPrice: 35.99,
+      exitPrice: null,
+      entryTime: '2026-09-02T14:53:13Z',
+      exitTime: null,
+      tradeDate: '2026-09-02',
+      pnl: 71.0,
+      instrumentType: 'stock',
+      accountIdentifier: '****1234',
+      executionData: [
+        { datetime: '2026-09-02T14:53:13Z', price: 35.99, quantity: 50, side: 'long', type: 'entry', orderId: '1007798045582' },
+        { datetime: '2026-09-03T14:30:21Z', price: 38.83, quantity: 25, side: 'short', type: 'exit', orderId: '1007813456055' }
+      ]
+    };
+
+    const isDup = schwabService.isDuplicateTrade(incomingIdentical, [existingOpen]);
+    expect(isDup).toBe(true);
   });
 });

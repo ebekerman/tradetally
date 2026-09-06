@@ -52,6 +52,9 @@ router.post('/connections/schwab/init', brokerSyncLimiter, brokerSyncController.
 // Handle Schwab OAuth callback (no auth required - user redirected from Schwab)
 router.get('/connections/schwab/callback', brokerSyncController.handleSchwabCallback);
 
+// Import Schwab tokens from JSON file / payload
+router.post('/connections/schwab/import-tokens', brokerSyncLimiter, validate(schemas.brokerSyncSchwabTokenImport), brokerSyncController.importSchwabTokens);
+
 // Initialize direct broker OAuth flow
 router.post('/connections/:broker/init', brokerSyncController.initBrokerOAuth);
 

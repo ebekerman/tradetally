@@ -1451,28 +1451,83 @@
             <div class="card-body">
               <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-4">Performance</h3>
               <dl class="space-y-4">
-                <div>
-                  <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">
-                    Net P&L
-                    <span v-if="!trade.exit_time && openUnrealizedPnL !== null" class="text-xs font-normal text-gray-400">(unrealized)</span>
-                  </dt>
-                  <dd class="mt-1 text-2xl font-semibold" :class="[
-                    (trade.exit_time ? displayPnl : openUnrealizedPnL) >= 0 ? 'text-green-600' : 'text-red-600'
-                  ]">
-                    <template v-if="trade.exit_time">{{ formatTradeCurrency(displayPnl) }}</template>
-                    <template v-else-if="openUnrealizedPnL !== null">{{ formatTradeCurrency(openUnrealizedPnL) }}</template>
-                    <template v-else>Open</template>
-                  </dd>
-                </div>
-                <div v-if="trade.pnl_percent || openUnrealizedPnLPercent !== null">
-                  <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">P&L %</dt>
-                  <dd class="mt-1 text-lg font-semibold" :class="[
-                    (trade.exit_time ? trade.pnl_percent : openUnrealizedPnLPercent) >= 0 ? 'text-green-600' : 'text-red-600'
-                  ]">
-                    <template v-if="trade.exit_time">{{ trade.pnl_percent > 0 ? '+' : '' }}{{ formatNumber(trade.pnl_percent) }}%</template>
-                    <template v-else>{{ openUnrealizedPnLPercent > 0 ? '+' : '' }}{{ formatNumber(openUnrealizedPnLPercent) }}%</template>
-                  </dd>
-                </div>
+                <!-- Case 1: Closed trade -->
+                <template v-if="trade.exit_time">
+                  <div>
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Net P&L</dt>
+                    <dd class="mt-1 text-2xl font-semibold" :class="[
+                      (displayPnl ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'
+                    ]">
+                      {{ formatTradeCurrency(displayPnl) }}
+                    </dd>
+                  </div>
+                  <div v-if="trade.pnl_percent">
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">P&L %</dt>
+                    <dd class="mt-1 text-lg font-semibold" :class="[
+                      trade.pnl_percent >= 0 ? 'text-green-600' : 'text-red-600'
+                    ]">
+                      {{ trade.pnl_percent > 0 ? '+' : '' }}{{ formatNumber(trade.pnl_percent) }}%
+                    </dd>
+                  </div>
+                </template>
+
+                <!-- Case 2: Open trade with partial realized P&L -->
+                <template v-else-if="displayPnl !== null">
+                  <div>
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Realized P&L</dt>
+                    <dd class="mt-1 text-2xl font-semibold" :class="[
+                      displayPnl >= 0 ? 'text-green-600' : 'text-red-600'
+                    ]">
+                      {{ formatTradeCurrency(displayPnl) }}
+                      <span v-if="trade.pnl_percent" class="text-base font-normal ml-1">
+                        ({{ trade.pnl_percent > 0 ? '+' : '' }}{{ formatNumber(trade.pnl_percent) }}%)
+                      </span>
+                    </dd>
+                  </div>
+                  <div v-if="openUnrealizedPnL !== null">
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Unrealized P&L</dt>
+                    <dd class="mt-1 text-xl font-semibold" :class="[
+                      openUnrealizedPnL >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
+                    ]">
+                      {{ formatTradeCurrency(openUnrealizedPnL) }}
+                      <span v-if="openUnrealizedPnLPercent !== null" class="text-sm font-normal ml-1">
+                        ({{ openUnrealizedPnLPercent > 0 ? '+' : '' }}{{ formatNumber(openUnrealizedPnLPercent) }}%)
+                      </span>
+                    </dd>
+                  </div>
+                  <div v-if="openUnrealizedPnL !== null">
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Total P&L (Realized + Unrealized)</dt>
+                    <dd class="mt-1 text-xl font-semibold" :class="[
+                      (displayPnl + openUnrealizedPnL) >= 0 ? 'text-green-600' : 'text-red-600'
+                    ]">
+                      {{ formatTradeCurrency(displayPnl + openUnrealizedPnL) }}
+                    </dd>
+                  </div>
+                </template>
+
+                <!-- Case 3: Open trade without realized exits -->
+                <template v-else>
+                  <div>
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">
+                      Net P&L
+                      <span v-if="openUnrealizedPnL !== null" class="text-xs font-normal text-gray-400">(unrealized)</span>
+                    </dt>
+                    <dd class="mt-1 text-2xl font-semibold" :class="[
+                      (openUnrealizedPnL ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'
+                    ]">
+                      <template v-if="openUnrealizedPnL !== null">{{ formatTradeCurrency(openUnrealizedPnL) }}</template>
+                      <template v-else>Open</template>
+                    </dd>
+                  </div>
+                  <div v-if="openUnrealizedPnLPercent !== null">
+                    <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">P&L %</dt>
+                    <dd class="mt-1 text-lg font-semibold" :class="[
+                      openUnrealizedPnLPercent >= 0 ? 'text-green-600' : 'text-red-600'
+                    ]">
+                      {{ openUnrealizedPnLPercent > 0 ? '+' : '' }}{{ formatNumber(openUnrealizedPnLPercent) }}%
+                    </dd>
+                  </div>
+                </template>
                 <div>
                   <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Price Change</dt>
                   <dd class="mt-1 text-sm text-gray-900 dark:text-white">
@@ -2243,7 +2298,10 @@ const processedExecutions = computed(() => {
   })
 })
 
-const displayPnl = computed(() => trade.value?.pnl ?? null)
+const displayPnl = computed(() => {
+  const val = trade.value?.pnl
+  return val !== null && val !== undefined && val !== '' ? Number(val) : null
+})
 
 // Open option positions can have a user-entered current premium stored by the
 // dashboard's Open Positions table (localStorage key matches DashboardView).

@@ -787,6 +787,18 @@ const schemas = {
     sync_start_date: nullableDate
   }),
 
+  brokerSyncSchwabTokenImport: Joi.object({
+    tokenData: Joi.alternatives().try(
+      Joi.object().unknown(),
+      Joi.string().trim().max(100000)
+    ).required(),
+    accountLabel: nullableString(255),
+    autoSyncEnabled: Joi.boolean().default(false),
+    syncFrequency: Joi.string().valid('manual', 'hourly', 'every_4_hours', 'every_6_hours', 'every_12_hours', 'daily').default('manual'),
+    syncTime: nullableString(10),
+    syncStartDate: nullableDate
+  }),
+
   brokerSyncConnectionUpdate: Joi.object({
     accountLabel: nullableString(255),
     autoSyncEnabled: Joi.boolean(),

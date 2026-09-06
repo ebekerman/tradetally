@@ -81,6 +81,7 @@
             @settings="openSettingsModal"
             @delete="handleDelete"
             @deleteTrades="handleDeleteTrades"
+            @updateTokens="openSchwabModal(true)"
           />
         </div>
       </div>
@@ -114,12 +115,12 @@
               class="p-6 border-2 rounded-lg transition-colors"
               :class="[
                 store.schwabConnection
-                  ? 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 opacity-50 cursor-not-allowed'
+                  ? 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 opacity-75 hover:border-primary-400 cursor-pointer'
                   : schwabConnecting
                     ? 'border-primary-300 dark:border-primary-700 bg-primary-50/50 dark:bg-primary-900/10 cursor-wait'
                     : 'border-dashed border-gray-300 dark:border-gray-600 hover:border-primary-500 dark:hover:border-primary-400 cursor-pointer'
               ]"
-              @click="!store.schwabConnection && !schwabConnecting && handleSchwabConnect()"
+              @click="!schwabConnecting && openSchwabModal(Boolean(store.schwabConnection))"
             >
               <div class="flex items-center space-x-4">
                 <div class="flex-shrink-0 w-12 h-12 bg-primary-100 dark:bg-primary-900/30 rounded-lg flex items-center justify-center">
@@ -129,7 +130,7 @@
                 <div>
                   <h4 class="font-medium text-gray-900 dark:text-white">Charles Schwab</h4>
                   <p class="text-sm text-gray-500 dark:text-gray-400">
-                    {{ store.schwabConnection ? 'Already connected' : schwabConnecting ? 'Connecting...' : 'Connect via OAuth' }}
+                    {{ store.schwabConnection ? 'Connected (click to update tokens)' : schwabConnecting ? 'Connecting...' : 'Connect via token file or OAuth' }}
                   </p>
                 </div>
               </div>
@@ -338,6 +339,17 @@
       @save="handleTrading212Save"
     />
 
+    <!-- Schwab Connection Modal -->
+    <SchwabConnectionModal
+      v-if="showSchwabModal"
+      :loading="store.loading"
+      :error="store.error"
+      :is-update="schwabModalIsUpdate"
+      @close="closeSchwabModal"
+      @import="handleSchwabTokenImport"
+      @oauth="handleSchwabConnectFromModal"
+    />
+
     <!-- Settings Modal -->
     <ConnectionSettingsModal
       v-if="showSettingsModal"
@@ -373,6 +385,7 @@ import { useUserTimezone } from '@/composables/useUserTimezone'
 import BrokerConnectionCard from '@/components/broker-sync/BrokerConnectionCard.vue'
 import IBKRConnectionModal from '@/components/broker-sync/IBKRConnectionModal.vue'
 import Trading212ConnectionModal from '@/components/broker-sync/Trading212ConnectionModal.vue'
+import SchwabConnectionModal from '@/components/broker-sync/SchwabConnectionModal.vue'
 import ConnectionSettingsModal from '@/components/broker-sync/ConnectionSettingsModal.vue'
 import IBKRNoticeBanner from '@/components/broker-sync/IBKRNoticeBanner.vue'
 import ManualTradeReviewModal from '@/components/import/ManualTradeReviewModal.vue'
@@ -413,6 +426,8 @@ const pricingLink = computed(() => `/pricing?redirect=${encodeURIComponent(route
 
 const showIBKRModal = ref(false)
 const showTrading212Modal = ref(false)
+const showSchwabModal = ref(false)
+const schwabModalIsUpdate = ref(false)
 const showSettingsModal = ref(false)
 const selectedConnection = ref(null)
 const schwabAccounts = ref([])
@@ -645,13 +660,44 @@ async function handleTrading212Save(connection) {
   }
 }
 
-async function handleSchwabConnect() {
+function openSchwabModal(isUpdate = false) {
+  store.clearError()
+  schwabModalIsUpdate.value = isUpdate
+  showSchwabModal.value = true
+}
+
+function closeSchwabModal() {
+  showSchwabModal.value = false
+  schwabModalIsUpdate.value = false
+  store.clearError()
+}
+
+async function handleSchwabTokenImport(payload) {
+  try {
+    await store.importSchwabTokens(payload)
+    showSchwabModal.value = false
+    scheduleSuccessMessage(
+      schwabModalIsUpdate.value
+        ? 'Schwab tokens updated successfully!'
+        : 'Schwab account connected successfully. Ready to sync trades.'
+    )
+  } catch (error) {
+    // Error is handled by store and displayed in modal
+  }
+}
+
+async function handleSchwabConnectFromModal(options = {}) {
+  showSchwabModal.value = false
+  await handleSchwabConnect(options)
+}
+
+async function handleSchwabConnect(options = {}) {
   try {
     schwabConnecting.value = true
     if (typeof window !== 'undefined') {
       window.sessionStorage.setItem(SCHWAB_PENDING_STORAGE_KEY, 'true')
     }
-    const authUrl = await store.initSchwabOAuth()
+    const authUrl = await store.initSchwabOAuth(options)
     // Redirect to Schwab OAuth
     window.location.href = authUrl
   } catch (error) {

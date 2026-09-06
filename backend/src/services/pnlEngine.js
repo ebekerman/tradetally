@@ -450,6 +450,7 @@ function processFillBased(input, executions, timezone, tradeId) {
     ? computePnlPercent(entryPriceAvg, exitPriceAvg ?? (totalExitQty > 0 ? totalExitNotional / totalExitQty : null), side, pnl, totalEntryQty || totalExitQty, instrumentType, pointValue, contractSize)
     : null;
   const tradeDate = earliestEntryTs ? dateInTimezone(earliestEntryTs, timezone) : null;
+  const netQuantity = totalEntryQty - totalExitQty;
 
   return {
     annotatedExecutions: annotated,
@@ -459,7 +460,9 @@ function processFillBased(input, executions, timezone, tradeId) {
       entry_time: earliestEntryTs,
       exit_time: isFullyClosed ? latestExitTs : null,
       trade_date: tradeDate,
-      quantity: totalEntryQty || totalExitQty,
+      quantity: isFullyClosed ? (totalEntryQty || totalExitQty) : (netQuantity > 0 ? netQuantity : (totalEntryQty || totalExitQty)),
+      net_quantity: netQuantity > 0 ? netQuantity : 0,
+      total_quantity: totalEntryQty || totalExitQty,
       commission: totalCommission,
       fees: totalFees,
       pnl,
