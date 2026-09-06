@@ -861,11 +861,12 @@ async function handleDeleteTrades(connection) {
         successMessage.value = result.message || `Deleted trades from ${brokerName}`
         setTimeout(() => { successMessage.value = '' }, 5000)
 
-        // Refresh trades data to update P&L and counts
-        console.log('[BROKER-SYNC] Refreshing trades store after delete...')
+        // Refresh trades data and broker connection status to update P&L and lastSyncAt
+        console.log('[BROKER-SYNC] Refreshing trades and connections store after delete...')
         await Promise.all([
           tradesStore.fetchTrades(),
-          tradesStore.fetchAnalytics()
+          tradesStore.fetchAnalytics(),
+          store.fetchConnections()
         ])
         console.log('[BROKER-SYNC] Trades store refreshed. Total P&L:', tradesStore.totalPnL, 'Total trades:', tradesStore.totalTrades)
       } catch (error) {

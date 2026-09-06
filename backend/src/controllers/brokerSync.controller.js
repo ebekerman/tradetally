@@ -1250,6 +1250,10 @@ const brokerSyncController = {
         });
       }
 
+      // Clear any deleted trade tombstones for this connection so future syncs can do a clean re-import
+      const BrokerSyncDeletedTrade = require('../models/BrokerSyncDeletedTrade');
+      await BrokerSyncDeletedTrade.clearForConnection(id);
+
       // Delete trades synced from this specific broker connection. IBKR legacy
       // sync rows can be missing broker_connection_id, so fall back by broker.
       const db = require('../config/database');
@@ -1279,6 +1283,9 @@ const brokerSyncController = {
         console.log(`[BROKER-SYNC] Invalidating analytics cache for user ${userId}`);
         await AnalyticsCache.invalidate(userId);
       }
+
+      // Clear last sync time and stats on the connection so future sync restarts fresh
+      await BrokerConnection.clearLastSync(id);
 
       res.json({
         success: true,

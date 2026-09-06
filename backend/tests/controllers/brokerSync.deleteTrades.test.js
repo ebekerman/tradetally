@@ -3,7 +3,12 @@ jest.mock('../../src/config/database', () => ({
 }));
 
 jest.mock('../../src/models/BrokerConnection', () => ({
-  findById: jest.fn()
+  findById: jest.fn(),
+  clearLastSync: jest.fn()
+}));
+
+jest.mock('../../src/models/BrokerSyncDeletedTrade', () => ({
+  clearForConnection: jest.fn()
 }));
 
 jest.mock('../../src/services/analyticsCache', () => ({
@@ -23,6 +28,7 @@ jest.mock('../../src/services/tierService', () => ({}));
 
 const db = require('../../src/config/database');
 const BrokerConnection = require('../../src/models/BrokerConnection');
+const BrokerSyncDeletedTrade = require('../../src/models/BrokerSyncDeletedTrade');
 const AnalyticsCache = require('../../src/services/analyticsCache');
 const OptionStrategyGroupingService = require('../../src/services/optionStrategyGroupingService');
 const brokerSyncController = require('../../src/controllers/brokerSync.controller');
@@ -74,6 +80,8 @@ describe('brokerSyncController.deleteBrokerTrades', () => {
     expect(legacySql).not.toContain('import_id IS NULL');
     expect(legacyParams).toEqual(['user-1', 'ibkr']);
 
+    expect(BrokerSyncDeletedTrade.clearForConnection).toHaveBeenCalledWith('conn-1');
+    expect(BrokerConnection.clearLastSync).toHaveBeenCalledWith('conn-1');
     expect(OptionStrategyGroupingService.rebuildUserGroupsSafe).toHaveBeenCalledWith('user-1', 'broker trade deletion');
     expect(AnalyticsCache.invalidate).toHaveBeenCalledWith('user-1');
     expect(res.payload).toEqual({
@@ -99,6 +107,8 @@ describe('brokerSyncController.deleteBrokerTrades', () => {
     await brokerSyncController.deleteBrokerTrades(req, res, next);
 
     expect(next).not.toHaveBeenCalled();
+    expect(BrokerSyncDeletedTrade.clearForConnection).toHaveBeenCalledWith('conn-1');
+    expect(BrokerConnection.clearLastSync).toHaveBeenCalledWith('conn-1');
     expect(db.query).toHaveBeenCalledTimes(1);
     expect(OptionStrategyGroupingService.rebuildUserGroupsSafe).not.toHaveBeenCalled();
     expect(AnalyticsCache.invalidate).not.toHaveBeenCalled();

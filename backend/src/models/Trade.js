@@ -1891,6 +1891,27 @@ class Trade {
           console.log(`Deleted ${deletedJobs.rows.length} jobs for trade ${id}`);
         }
 
+        // Look up the trade before deletion
+        const tradeLookup = await client.query(
+          `SELECT * FROM trades WHERE id = $1 AND user_id = $2`,
+          [id, userId]
+        );
+
+        if (tradeLookup.rows.length === 0) {
+          // Throw to roll back the job deletions as well
+          const notFound = new Error('Trade not found');
+          notFound.sentinel = TRADE_NOT_FOUND;
+          throw notFound;
+        }
+
+        const tradeToRecord = tradeLookup.rows[0];
+
+        // If from a broker sync or broker is specified, record tombstone to prevent reimport
+        if (tradeToRecord.broker_connection_id || tradeToRecord.broker) {
+          const BrokerSyncDeletedTrade = require('./BrokerSyncDeletedTrade');
+          await BrokerSyncDeletedTrade.recordDeletedTrades([tradeToRecord], userId, client);
+        }
+
         // Then delete the trade
         const tradeDeleteQuery = `
           DELETE FROM trades
@@ -1899,13 +1920,6 @@ class Trade {
         `;
 
         const result = await client.query(tradeDeleteQuery, [id, userId]);
-
-        if (result.rows.length === 0) {
-          // Throw to roll back the job deletions as well
-          const notFound = new Error('Trade not found');
-          notFound.sentinel = TRADE_NOT_FOUND;
-          throw notFound;
-        }
 
         return result.rows[0];
       });

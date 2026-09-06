@@ -1367,6 +1367,20 @@ const tradeController = {
           // Delete associated jobs and trades together in one transaction
           // (same job cleanup predicate as Trade.delete, batched)
           const deletedRows = await db.withTransaction(async (client) => {
+            // Find trades to check for broker association
+            const tradesToRecordRes = await client.query(
+              `SELECT * FROM trades
+               WHERE id = ANY($1::uuid[])
+                 AND user_id = $2
+                 AND (broker_connection_id IS NOT NULL OR broker IS NOT NULL)`,
+              [idsToDelete, req.user.id]
+            );
+
+            if (tradesToRecordRes.rows.length > 0) {
+              const BrokerSyncDeletedTrade = require('../models/BrokerSyncDeletedTrade');
+              await BrokerSyncDeletedTrade.recordDeletedTrades(tradesToRecordRes.rows, req.user.id, client);
+            }
+
             const deletedJobs = await client.query(
               `DELETE FROM job_queue
                WHERE data->>'tradeId' = ANY($1::text[])

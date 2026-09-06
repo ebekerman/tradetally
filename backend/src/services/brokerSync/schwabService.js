@@ -22,6 +22,7 @@ const { computeTradePnl } = require('../pnlEngine');
 
 const SCHWAB_API_BASE = 'https://api.schwabapi.com/trader/v1';
 const TOKEN_REFRESH_BUFFER = 5 * 60 * 1000; // Refresh 5 minutes before expiration
+const SCHWAB_SYNC_OVERLAP_DAYS = 7; // 7-day lookback overlap for incremental sync
 
 class SchwabService {
   /**
@@ -1216,6 +1217,51 @@ class SchwabService {
   /**
    * Sync trades from Schwab
    * @param {object} connection - BrokerConnection with credentials
+  /**
+   * Determine the effective start date for Schwab sync.
+   * If an explicit options.startDate is passed, it is respected (clamped to syncStartDate floor).
+   * Otherwise, if connection.lastSyncAt is present, we scan incrementally from 7 days before lastSyncAt
+   * (clamped to syncStartDate floor if configured).
+   * If connection.lastSyncAt is null, it falls back to connection.syncStartDate (or null for all history).
+   * @param {object} connection
+   * @param {object} options
+   * @returns {string|null}
+   */
+  resolveEffectiveStartDate(connection, options = {}) {
+    const connectionStartFloor = connection.syncStartDate
+      ? this._extractDateString(connection.syncStartDate)
+      : null;
+
+    // 1. Explicit startDate passed by caller
+    if (options.startDate) {
+      const explicitStart = this._extractDateString(options.startDate);
+      if (connectionStartFloor && explicitStart < connectionStartFloor) {
+        return connectionStartFloor;
+      }
+      return explicitStart;
+    }
+
+    // 2. Incremental sync using lastSyncAt (with 7-day lookback buffer)
+    if (connection.lastSyncAt) {
+      const lastSyncDate = new Date(connection.lastSyncAt);
+      if (!isNaN(lastSyncDate.getTime())) {
+        lastSyncDate.setUTCDate(lastSyncDate.getUTCDate() - SCHWAB_SYNC_OVERLAP_DAYS);
+        const incrementalStart = lastSyncDate.toISOString().slice(0, 10);
+        // If connection has a syncStartDate floor, do not go earlier than the floor
+        if (connectionStartFloor && incrementalStart < connectionStartFloor) {
+          return connectionStartFloor;
+        }
+        return incrementalStart;
+      }
+    }
+
+    // 3. First sync or lastSyncAt cleared: fallback to syncStartDate floor or null (all history)
+    return connectionStartFloor || null;
+  }
+
+  /**
+   * Sync trades from Schwab for a specific connection
+   * @param {object} connection - BrokerConnection object with credentials
    * @param {object} options - Sync options
    */
   async syncTrades(connection, options = {}) {
@@ -1223,21 +1269,10 @@ class SchwabService {
 
     console.log(`[SCHWAB] Starting sync for connection ${connection.id}`);
 
-    // Resolve starting date floor from connection.syncStartDate
-    const connectionStartFloor = connection.syncStartDate
-      ? this._extractDateString(connection.syncStartDate)
-      : null;
-
-    // Use connection's syncStartDate as a hard floor:
-    // If startDate is passed, but earlier than connectionStartFloor, clamp to connectionStartFloor.
-    // If startDate is not passed, use connectionStartFloor.
-    let effectiveStartDate = startDate || connectionStartFloor;
-    if (startDate && connectionStartFloor && startDate < connectionStartFloor) {
-      effectiveStartDate = connectionStartFloor;
-    }
+    const effectiveStartDate = this.resolveEffectiveStartDate(connection, options);
 
     if (effectiveStartDate) {
-      console.log(`[SCHWAB] Sync starting date floor enforced: ${effectiveStartDate}`);
+      console.log(`[SCHWAB] Sync starting date enforced: ${effectiveStartDate}${connection.lastSyncAt && !options.startDate ? ' (incremental from lastSyncAt)' : ''}`);
     }
 
     // Ensure we have a valid token
@@ -1344,9 +1379,26 @@ class SchwabService {
       await BrokerConnection.updateSyncLog(syncLogId, 'importing');
     }
 
+    // Fetch previously deleted trades to prevent reimporting them
+    let deletedTrades = [];
+    try {
+      const BrokerSyncDeletedTrade = require('../../models/BrokerSyncDeletedTrade');
+      deletedTrades = await BrokerSyncDeletedTrade.getDeletedTradesForConnection(
+        connection.userId,
+        connection.id,
+        'schwab'
+      );
+    } catch (deletedErr) {
+      console.warn('[SCHWAB] Could not load deleted trades tombstone:', deletedErr.message);
+    }
+
     // Import trades with connection ID for tracking
-    const result = effectiveStartDate
-      ? await this.importTrades(connection.userId, connection.id, trades, { startDate: effectiveStartDate })
+    const importOptions = {};
+    if (effectiveStartDate) importOptions.startDate = effectiveStartDate;
+    if (deletedTrades && deletedTrades.length > 0) importOptions.deletedTrades = deletedTrades;
+
+    const result = Object.keys(importOptions).length > 0
+      ? await this.importTrades(connection.userId, connection.id, trades, importOptions)
       : await this.importTrades(connection.userId, connection.id, trades);
 
     console.log(`[SCHWAB] Sync complete: ${result.imported} imported, ${result.duplicates} duplicates`);
@@ -1367,6 +1419,8 @@ class SchwabService {
     let failed = 0;
     let duplicates = 0;
 
+    const deletedTrades = Array.isArray(options.deletedTrades) ? options.deletedTrades : [];
+
     const startDateFloor = options.startDate ? this._extractDateString(options.startDate) : null;
     let filteredTrades = trades;
     if (startDateFloor) {
@@ -1381,6 +1435,13 @@ class SchwabService {
 
     for (const tradeData of filteredTrades) {
       try {
+        // Check if trade was manually deleted by user in the past
+        if (this.isDeletedTrade(tradeData, deletedTrades)) {
+          console.log(`[SCHWAB] Skipping previously deleted trade: ${tradeData.symbol} on ${tradeData.tradeDate || tradeData.entryTime}`);
+          skipped++;
+          continue;
+        }
+
         // Check for duplicates or trade updates
         const isDuplicate = this.isDuplicateTrade(tradeData, existingTrades);
 
@@ -1606,6 +1667,25 @@ class SchwabService {
         }
       }
 
+      // Check if newTrade is an orphan closing fill for an existing open trade
+      if (newTrade.entryPrice == null && newTrade.exitPrice != null && existing.exit_price == null && existing.entry_price != null) {
+        const sameSide = (!newTrade.side || !existing.side || newTrade.side === existing.side);
+        const qtyMatches = Math.abs((parseFloat(existing.quantity) || 0) - newQty) < 0.001;
+        if (sameSide && qtyMatches) {
+          console.log(`[SCHWAB] Matched closing execution for open trade ${existing.id} (${symbol}) - marked for UPDATE`);
+          newTrade.isUpdate = true;
+          newTrade.existingTradeId = existing.id;
+          newTrade.entryPrice = parseFloat(existing.entry_price);
+          newTrade.entryTime = existing.entry_time;
+          let existingExecs = existing.executions;
+          if (typeof existingExecs === 'string') {
+            try { existingExecs = JSON.parse(existingExecs); } catch { existingExecs = []; }
+          }
+          newTrade.executionData = [...(Array.isArray(existingExecs) ? existingExecs : []), ...(newTrade.executionData || [])];
+          return false;
+        }
+      }
+
       // 1. Check execution data match (by EXIT order ID + datetime) - most reliable
       // IMPORTANT: Only match on EXIT executions, not entry executions.
       // For partial exits (buy 15, sell 5, sell 10 later), all partial trades share
@@ -1704,6 +1784,82 @@ class SchwabService {
         if (existingDateForPnL === newTradeDate && Math.abs(existingPnL - newPnL) < 0.02) {
           console.log(`[SCHWAB] Duplicate found by P&L: ${symbol} on ${newTradeDate} ($${newPnL})`);
           return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Check if incoming trade matches a previously deleted trade tombstone
+   * @param {object} newTrade
+   * @param {Array} deletedTrades
+   * @returns {boolean}
+   */
+  isDeletedTrade(newTrade, deletedTrades) {
+    if (!newTrade || !deletedTrades || !Array.isArray(deletedTrades) || deletedTrades.length === 0) {
+      return false;
+    }
+
+    const newSymbol = newTrade.symbol?.toUpperCase();
+    if (!newSymbol) return false;
+
+    // 1. Check by Schwab execution order ID (highest reliability)
+    if (newTrade.executionData?.length > 0) {
+      const newOrderIds = new Set(
+        newTrade.executionData
+          .map(e => e.orderId || e.order_id)
+          .filter(Boolean)
+          .map(id => String(id).trim())
+      );
+
+      if (newOrderIds.size > 0) {
+        for (const deleted of deletedTrades) {
+          const deletedOrderIds = Array.isArray(deleted.order_ids) ? deleted.order_ids : [];
+          const hasMatchingOrderId = deletedOrderIds.some(id => newOrderIds.has(String(id).trim()));
+          if (hasMatchingOrderId) {
+            console.log(`[SCHWAB] Deleted trade match by order ID: ${newSymbol} (${Array.from(newOrderIds).join(', ')})`);
+            return true;
+          }
+        }
+      }
+    }
+
+    // 2. Fallback check by trade signature: symbol + side + date + quantity + price
+    const newTradeDate = newTrade.tradeDate || this._extractDateString(newTrade.entryTime || newTrade.exitTime);
+    const newQty = parseFloat(newTrade.quantity) || 0;
+    const newEntryPrice = parseFloat(newTrade.entryPrice) || 0;
+    const newExitPrice = parseFloat(newTrade.exitPrice) || 0;
+    const newAccountIdentifier = newTrade.accountIdentifier || null;
+
+    for (const deleted of deletedTrades) {
+      if (!this._tradeSymbolsMatch(newTrade, deleted)) continue;
+
+      if (newAccountIdentifier && deleted.account_identifier && newAccountIdentifier !== deleted.account_identifier) {
+        continue;
+      }
+
+      if (newTrade.side && deleted.side && newTrade.side.toLowerCase() !== deleted.side.toLowerCase()) {
+        continue;
+      }
+
+      const deletedTradeDate = this._extractDateString(deleted.trade_date || deleted.entry_time || deleted.exit_time);
+      if (newTradeDate && deletedTradeDate && newTradeDate === deletedTradeDate) {
+        const deletedQty = parseFloat(deleted.quantity) || 0;
+        if (Math.abs(newQty - deletedQty) < 0.001) {
+          const deletedEntryPrice = parseFloat(deleted.entry_price) || 0;
+          const deletedExitPrice = parseFloat(deleted.exit_price) || 0;
+
+          const entryPriceMatches = !newEntryPrice || !deletedEntryPrice ||
+            Math.abs(newEntryPrice - deletedEntryPrice) / deletedEntryPrice < 0.01;
+          const exitPriceMatches = !newExitPrice || !deletedExitPrice ||
+            Math.abs(newExitPrice - deletedExitPrice) / deletedExitPrice < 0.01;
+
+          if (entryPriceMatches && exitPriceMatches) {
+            console.log(`[SCHWAB] Deleted trade match by signature: ${newSymbol} on ${newTradeDate}`);
+            return true;
+          }
         }
       }
     }

@@ -387,6 +387,31 @@ class BrokerConnection {
   }
 
   /**
+   * Clear last sync timestamp and stats for a broker connection.
+   * Called when all imported trades are deleted to allow a clean full reimport.
+   */
+  static async clearLastSync(connectionId, client = null) {
+    const queryRunner = client || db;
+    const query = `
+      UPDATE broker_connections
+      SET last_sync_at = NULL,
+          last_sync_status = NULL,
+          last_sync_trades_imported = 0,
+          last_sync_trades_skipped = 0,
+          last_error_at = NULL,
+          last_error_message = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING *
+    `;
+
+    const result = await queryRunner.query(query, [connectionId]);
+    if (result.rows.length === 0) return null;
+
+    return this.formatConnection(result.rows[0], false);
+  }
+
+  /**
    * Bring next_scheduled_sync forward when a sync failed with a transient
    * error (timeout, DNS hiccup, IBKR "try again later"). The regular
    * scheduler will pick the connection up on its next pass and retry.
