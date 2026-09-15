@@ -191,6 +191,57 @@ describe('Schwab lastSyncAt and Deleted Trade Suppression', () => {
       expect(incomingClosingTrade.entryPrice).toBe(200.00);
       expect(incomingClosingTrade.executionData).toHaveLength(2);
     });
+
+    test('detects duplicate when incoming trade matches exit execution of closed swing trade opened before sync window', () => {
+      const existingClosedSwingTrade = {
+        id: 'trade-swing-1',
+        symbol: 'TASK',
+        side: 'long',
+        quantity: 250,
+        entry_price: 7.08,
+        exit_price: 7.80,
+        entry_time: '2026-08-13T13:37:40Z',
+        exit_time: '2026-09-01T19:50:00Z',
+        trade_date: '2026-08-13',
+        executions: [
+          { orderId: 'ord-entry-1', datetime: '2026-08-13T13:37:40Z', price: 7.08, quantity: 250, type: 'entry' },
+          { orderId: 'ord-exit-1', datetime: '2026-08-14T13:30:53Z', price: 7.40, quantity: 100, type: 'exit' },
+          { orderId: 'ord-exit-2', datetime: '2026-08-28T13:50:16Z', price: 8.2189, quantity: 100, type: 'exit' },
+          { orderId: '1007747203099', datetime: '2026-09-01T19:50:00Z', price: 7.76, quantity: 50, type: 'exit' }
+        ]
+      };
+
+      const incomingTrade = {
+        symbol: 'TASK',
+        side: 'long',
+        quantity: 50,
+        entryPrice: null,
+        exitPrice: 7.76,
+        entryTime: null,
+        exitTime: '2026-09-01T19:50:00Z',
+        tradeDate: '2026-09-01',
+        executionData: [
+          { orderId: '1007747203099', datetime: '2026-09-01T19:50:00Z', price: 7.76, quantity: 50, type: 'exit' }
+        ]
+      };
+
+      const isDup = schwabService.isDuplicateTrade(incomingTrade, [existingClosedSwingTrade]);
+      expect(isDup).toBe(true);
+    });
+
+    test('getExistingTrades queries trades with trade_date or exit_time in range or exit_price IS NULL', async () => {
+      db.query.mockResolvedValueOnce({ rows: [] });
+
+      await schwabService.getExistingTrades('user-1', [
+        { tradeDate: '2026-09-01' },
+        { tradeDate: '2026-09-09' }
+      ]);
+
+      expect(db.query).toHaveBeenCalledWith(
+        expect.stringMatching(/exit_time\s*>=\s*\$2::timestamptz.*exit_price\s+IS\s+NULL/is),
+        ['user-1', '2026-09-01', '2026-09-09']
+      );
+    });
   });
 
   describe('BrokerSyncDeletedTrade model', () => {

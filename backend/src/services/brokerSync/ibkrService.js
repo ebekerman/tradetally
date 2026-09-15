@@ -1558,8 +1558,11 @@ class IBKRService {
     if (minDate && maxDate) {
       params.push(minDate, maxDate);
       query += `
-        AND trade_date >= $2
-        AND trade_date <= $3
+        AND (
+          (trade_date >= $2 AND trade_date <= $3)
+          OR (exit_time >= $2::timestamptz AND exit_time < ($3::date + 1)::timestamptz)
+          OR exit_price IS NULL
+        )
       `;
     }
 

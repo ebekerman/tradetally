@@ -361,7 +361,11 @@ class OAuthBrokerBase {
     let rangeClause = '';
     if (dates.length) {
       params.push(dates[0], dates[dates.length - 1]);
-      rangeClause = 'AND trade_date >= $2 AND trade_date <= $3';
+      rangeClause = `AND (
+        (trade_date >= $2 AND trade_date <= $3)
+        OR (exit_time >= $2::timestamptz AND exit_time < ($3::date + 1)::timestamptz)
+        OR exit_price IS NULL
+      )`;
     }
 
     const result = await db.query(

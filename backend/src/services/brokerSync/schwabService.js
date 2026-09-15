@@ -613,10 +613,11 @@ class SchwabService {
         // Match against open positions using FIFO
         if (!openPositions[positionKey] || openPositions[positionKey].length === 0) {
           // No matching open - position was opened before sync window
-          // Use Schwab's netAmount for P&L
+          // An exit sell (short direction) closes a long position; buy-to-cover closes a short position.
+          const tradeSide = (tx.side === 'short' || tx.quantity < 0) ? 'long' : 'short';
           rawTrades.push({
             symbol,
-            side: tx.side,
+            side: tradeSide,
             quantity: tx.quantity,
             entryPrice: null,
             exitPrice: tx.price,
@@ -1025,9 +1026,10 @@ class SchwabService {
    */
   createPartialTrade(tx, side) {
     if (side === 'close') {
+      const tradeSide = (tx.side === 'short' || tx.quantity < 0) ? 'long' : 'short';
       return {
         symbol: tx.symbol,
-        side: tx.side,
+        side: tradeSide,
         quantity: tx.quantity,
         entryPrice: null,
         exitPrice: tx.price,
@@ -1609,8 +1611,11 @@ class SchwabService {
     if (minDate && maxDate) {
       params.push(minDate, maxDate);
       query += `
-        AND trade_date >= $2
-        AND trade_date <= $3
+        AND (
+          (trade_date >= $2 AND trade_date <= $3)
+          OR (exit_time >= $2::timestamptz AND exit_time < ($3::date + 1)::timestamptz)
+          OR exit_price IS NULL
+        )
       `;
     }
 
