@@ -16,6 +16,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   # Application (Frontend + Backend)
   # Build locally to ensure latest features including chart fixes
