@@ -7,6 +7,9 @@
           <p class="mt-3 text-sm text-gray-600 dark:text-gray-400">
             The app hit an unexpected error and stopped rendering this view.
           </p>
+          <div v-if="runtimeError?.message" class="mt-4 rounded-md border border-gray-200 bg-gray-50 p-3 text-xs font-mono text-gray-700 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300 break-words">
+            {{ runtimeError.message }}
+          </div>
           <div class="mt-6 flex gap-3">
             <button class="btn btn-primary" @click="reloadApp">
               Reload

@@ -892,6 +892,26 @@ async function detectStandbyMode() {
   }
 }
 
+// Ensure database connection is active and accepting queries before proceeding with startup
+async function waitForDatabase(maxRetries = 15, delayMs = 2000) {
+  const db = require('./config/database');
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await db.query('SELECT 1');
+      return;
+    } catch (err) {
+      if (attempt === maxRetries) {
+        throw err;
+      }
+      logger.warn(
+        `Database not ready yet (attempt ${attempt}/${maxRetries}): ${err.message}. Retrying in ${delayMs / 1000}s...`,
+        'startup'
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 // Function to start server with migration
 async function startServer() {
   try {
@@ -900,6 +920,10 @@ async function startServer() {
     warnings.forEach((warning) => logger.warn(warning, 'startup'));
     const storageHealth = await storageHealthService.getHealth();
     storageHealth.warnings.forEach((warning) => logger.warn(warning, 'startup'));
+
+    // Wait for database to be fully accepting queries (e.g. if recovering after restart)
+    await waitForDatabase();
+
     // A read-only standby must never write on boot or start schedulers.
     const standbyMode = await detectStandbyMode();
     const backgroundJobsDisabled = isBackgroundJobsDisabled() || standbyMode;

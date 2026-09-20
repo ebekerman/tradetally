@@ -40,9 +40,26 @@ window.addEventListener('error', (event) => {
 
 window.addEventListener('unhandledrejection', (event) => {
   console.error('Unhandled promise rejection:', event.reason)
+  const reason = event.reason
+  const message = reason?.message || String(reason || '')
+
+  // Don't crash the entire application on network, HTTP, or request cancellation errors
+  const isNetworkOrHttpError =
+    reason?.isAxiosError ||
+    reason?.name === 'AxiosError' ||
+    reason?.name === 'AbortError' ||
+    reason?.code === 'ERR_NETWORK' ||
+    reason?.code === 'ECONNABORTED' ||
+    Boolean(reason?.response?.status) ||
+    /failed to fetch|network\s?error|load failed/i.test(message)
+
+  if (isNetworkOrHttpError) {
+    return
+  }
+
   window.dispatchEvent(new CustomEvent('app-runtime-error', {
     detail: {
-      message: event.reason?.message || 'Unhandled promise rejection'
+      message: message || 'Unhandled promise rejection'
     }
   }))
 })
