@@ -130,7 +130,7 @@
                 <div>
                   <h4 class="font-medium text-gray-900 dark:text-white">Charles Schwab</h4>
                   <p class="text-sm text-gray-500 dark:text-gray-400">
-                    {{ store.schwabConnection ? 'Connected (click to update tokens)' : schwabConnecting ? 'Connecting...' : 'Connect via token file or OAuth' }}
+                    {{ store.schwabConnection ? (store.schwabConnection.connectionStatus === 'expired' ? 'Token expired (click to re-authenticate)' : 'Connected (click to update tokens)') : schwabConnecting ? 'Connecting...' : 'Connect via token file or OAuth' }}
                   </p>
                 </div>
               </div>
@@ -345,9 +345,11 @@
       :loading="store.loading"
       :error="store.error"
       :is-update="schwabModalIsUpdate"
+      :existing-connection="store.schwabConnection"
       @close="closeSchwabModal"
       @import="handleSchwabTokenImport"
       @oauth="handleSchwabConnectFromModal"
+      @exchange-code="handleSchwabExchangeCode"
     />
 
     <!-- Settings Modal -->
@@ -679,6 +681,20 @@ async function handleSchwabTokenImport(payload) {
     scheduleSuccessMessage(
       schwabModalIsUpdate.value
         ? 'Schwab tokens updated successfully!'
+        : 'Schwab account connected successfully. Ready to sync trades.'
+    )
+  } catch (error) {
+    // Error is handled by store and displayed in modal
+  }
+}
+
+async function handleSchwabExchangeCode(payload) {
+  try {
+    await store.exchangeSchwabCode(payload)
+    showSchwabModal.value = false
+    scheduleSuccessMessage(
+      schwabModalIsUpdate.value
+        ? 'Schwab tokens updated and account re-authenticated successfully!'
         : 'Schwab account connected successfully. Ready to sync trades.'
     )
   } catch (error) {

@@ -799,6 +799,17 @@ const schemas = {
     syncStartDate: nullableDate
   }),
 
+  brokerSyncSchwabExchangeCode: Joi.object({
+    redirectUrl: Joi.string().trim().max(4000),
+    code: Joi.string().trim().max(2000),
+    state: nullableString(255),
+    accountLabel: nullableString(255),
+    autoSyncEnabled: Joi.boolean().default(false),
+    syncFrequency: Joi.string().valid('manual', 'hourly', 'every_4_hours', 'every_6_hours', 'every_12_hours', 'daily').default('manual'),
+    syncTime: nullableString(10),
+    syncStartDate: nullableDate
+  }).or('redirectUrl', 'code'),
+
   brokerSyncConnectionUpdate: Joi.object({
     accountLabel: nullableString(255),
     autoSyncEnabled: Joi.boolean(),

@@ -7,9 +7,15 @@ jest.mock('../../src/config/database', () => ({
 }));
 jest.mock('../../src/models/BrokerConnection', () => ({
   create: jest.fn().mockResolvedValue({ id: 'connection-1' }),
+  update: jest.fn().mockResolvedValue(),
   updateStatus: jest.fn().mockResolvedValue(),
   updateBrokerMetadata: jest.fn().mockResolvedValue(),
-  findById: jest.fn().mockResolvedValue({ id: 'connection-1', brokerType: 'tradestation' })
+  findById: jest.fn().mockResolvedValue({ id: 'connection-1', brokerType: 'tradestation' }),
+  findByUserId: jest.fn().mockResolvedValue([]),
+  calculateNextSync: jest.fn().mockReturnValue(new Date('2026-10-11T09:00:00Z'))
+}));
+jest.mock('../../src/utils/timezone', () => ({
+  getUserTimezone: jest.fn().mockResolvedValue('America/New_York')
 }));
 jest.mock('axios', () => ({
   post: jest.fn(),
@@ -282,5 +288,172 @@ describe('Schwab account exclusions', () => {
       { excluded_account_identifiers: ['****1111'] }
     );
     expect(res.payload.data.excluded_account_identifiers).toEqual(['****1111']);
+  });
+});
+
+describe('Schwab OAuth code exchange — manual redirect URL paste', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.SCHWAB_CLIENT_ID = 'client';
+    process.env.SCHWAB_CLIENT_SECRET = 'secret';
+    process.env.SCHWAB_REDIRECT_URI = 'https://127.0.0.1:8081/api/broker-sync/connections/schwab/callback';
+  });
+
+  describe('extractSchwabOAuthParams', () => {
+    const { extractSchwabOAuthParams } = brokerSyncController;
+
+    test('extracts code and decodes %40 to @ from full redirect URL', () => {
+      const result = extractSchwabOAuthParams(
+        'https://127.0.0.1:8081/api/broker-sync/connections/schwab/callback?code=C0.abc123xyz%40&session=sess99&state=mystate'
+      );
+      expect(result.code).toBe('C0.abc123xyz@');
+      expect(result.state).toBe('mystate');
+      expect(result.error).toBeNull();
+    });
+
+    test('extracts code from query string only', () => {
+      const result = extractSchwabOAuthParams('?code=C0.mycode%40&session=abc');
+      expect(result.code).toBe('C0.mycode@');
+    });
+
+    test('extracts code when candidate starts with C0. directly', () => {
+      const result = extractSchwabOAuthParams('C0.rawcode123%40');
+      expect(result.code).toBe('C0.rawcode123@');
+    });
+
+    test('detects error in query parameters', () => {
+      const result = extractSchwabOAuthParams(
+        'https://127.0.0.1:8081/callback?error=access_denied&error_description=User+denied'
+      );
+      expect(result.error).toBe('access_denied');
+      expect(result.errorDescription).toBe('User denied');
+      expect(result.code).toBeNull();
+    });
+
+    test('returns null code for invalid text', () => {
+      const result = extractSchwabOAuthParams('hello world');
+      expect(result.code).toBeNull();
+    });
+  });
+
+  describe('exchangeSchwabCode controller', () => {
+    test('rejects request when no valid code can be found', async () => {
+      const req = {
+        user: { id: 'user-123' },
+        body: { redirectUrl: 'https://example.com/no-code' }
+      };
+      const res = createRes();
+      const next = jest.fn();
+
+      await brokerSyncController.exchangeSchwabCode(req, res, next);
+
+      expect(res.statusCode).toBe(400);
+      expect(res.payload.error).toMatch(/Could not find a valid Schwab authorization code/);
+    });
+
+    test('rejects request when Schwab reported an error in the redirect URL', async () => {
+      const req = {
+        user: { id: 'user-123' },
+        body: { redirectUrl: 'https://127.0.0.1/?error=access_denied&error_description=User+cancelled' }
+      };
+      const res = createRes();
+      const next = jest.fn();
+
+      await brokerSyncController.exchangeSchwabCode(req, res, next);
+
+      expect(res.statusCode).toBe(400);
+      expect(res.payload.error).toMatch(/User cancelled/);
+    });
+
+    test('successfully exchanges code from pasted redirect URL and activates connection', async () => {
+      axios.post.mockResolvedValueOnce({
+        data: { access_token: 'AT-123', refresh_token: 'RT-456', expires_in: 1800 }
+      });
+      axios.get.mockResolvedValueOnce({
+        data: [{ securitiesAccount: { accountNumber: '87654321' } }]
+      });
+      BrokerConnection.findByUserId.mockResolvedValueOnce([]);
+      BrokerConnection.findById.mockResolvedValueOnce({
+        id: 'conn-schwab-1',
+        brokerType: 'schwab',
+        connectionStatus: 'active'
+      });
+
+      const req = {
+        user: { id: 'user-123' },
+        body: {
+          redirectUrl: 'https://127.0.0.1:8081/api/broker-sync/connections/schwab/callback?code=C0.abc999%40&session=xyz',
+          accountLabel: 'My Schwab'
+        }
+      };
+      const res = createRes();
+      const next = jest.fn();
+
+      await brokerSyncController.exchangeSchwabCode(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.statusCode).toBe(200);
+      expect(res.payload.success).toBe(true);
+
+      // Verify token exchange call with decoded code
+      expect(axios.post).toHaveBeenCalledTimes(1);
+      const [tokenUrl, body, config] = axios.post.mock.calls[0];
+      expect(tokenUrl).toBe('https://api.schwabapi.com/v1/oauth/token');
+      expect(body.get('code')).toBe('C0.abc999@');
+      expect(body.get('grant_type')).toBe('authorization_code');
+      expect(body.get('redirect_uri')).toBe(process.env.SCHWAB_REDIRECT_URI);
+
+      // Verify connection creation and status update
+      expect(BrokerConnection.create).toHaveBeenCalledWith('user-123', expect.objectContaining({
+        brokerType: 'schwab',
+        schwabAccessToken: 'AT-123',
+        schwabRefreshToken: 'RT-456',
+        accountLabel: 'My Schwab'
+      }));
+      expect(BrokerConnection.updateStatus).toHaveBeenCalledWith('connection-1', 'active', expect.any(String));
+    });
+
+    test('preserves existing connection settings when updating/re-authenticating', async () => {
+      axios.post.mockResolvedValueOnce({
+        data: { access_token: 'AT-new', refresh_token: 'RT-new', expires_in: 1800 }
+      });
+      axios.get.mockResolvedValueOnce({
+        data: [{ securitiesAccount: { accountNumber: '87654321' } }]
+      });
+      BrokerConnection.findByUserId.mockResolvedValueOnce([{
+        id: 'existing-schwab',
+        brokerType: 'schwab',
+        accountLabel: 'Original Label',
+        autoSyncEnabled: true,
+        syncFrequency: 'hourly',
+        syncTime: '09:00:00',
+        syncStartDate: '2025-01-01'
+      }]);
+      BrokerConnection.findById.mockResolvedValueOnce({
+        id: 'existing-schwab',
+        brokerType: 'schwab',
+        connectionStatus: 'active'
+      });
+
+      const req = {
+        user: { id: 'user-123' },
+        body: {
+          redirectUrl: 'https://127.0.0.1:8081/cb?code=C0.newcode%40'
+          // no settings passed, must preserve existing
+        }
+      };
+      const res = createRes();
+      const next = jest.fn();
+
+      await brokerSyncController.exchangeSchwabCode(req, res, next);
+
+      expect(res.statusCode).toBe(200);
+      expect(BrokerConnection.create).toHaveBeenCalledWith('user-123', expect.objectContaining({
+        accountLabel: 'Original Label',
+        autoSyncEnabled: true,
+        syncFrequency: 'hourly',
+        syncStartDate: '2025-01-01'
+      }));
+    });
   });
 });

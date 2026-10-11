@@ -73,7 +73,8 @@ describe('BrokerSyncView sync outcomes', () => {
       trading212Connections: [],
       fetchConnections: vi.fn(),
       fetchSyncLogs: vi.fn(),
-      clearError: vi.fn()
+      clearError: vi.fn(),
+      exchangeSchwabCode: vi.fn().mockResolvedValue({ id: 'schwab-1' })
     })
   })
 
@@ -97,5 +98,33 @@ describe('BrokerSyncView sync outcomes', () => {
     expect(wrapper.text()).toContain('Jul 31, 2026, 18:00:00')
     expect(wrapper.get('details').text()).toContain('Open position quantity could not be reconciled safely.')
     expect(mocks.brokerStore.fetchSyncLogs).toHaveBeenCalled()
+  })
+
+  it('handles exchange-code event from SchwabConnectionModal', async () => {
+    const wrapper = shallowMount(BrokerSyncView, {
+      global: {
+        stubs: {
+          RouterLink: { template: '<a><slot /></a>' }
+        }
+      }
+    })
+    await flushPromises()
+
+    // Open Schwab modal
+    const schwabCard = wrapper.findAll('h4').find(node => node.text() === 'Charles Schwab')
+    await schwabCard.trigger('click')
+
+    const modal = wrapper.findComponent({ name: 'SchwabConnectionModal' })
+    expect(modal.exists()).toBe(true)
+
+    await modal.vm.$emit('exchange-code', {
+      redirectUrl: 'https://127.0.0.1:8081/?code=C0.code123@',
+      code: 'C0.code123@'
+    })
+
+    expect(mocks.brokerStore.exchangeSchwabCode).toHaveBeenCalledWith({
+      redirectUrl: 'https://127.0.0.1:8081/?code=C0.code123@',
+      code: 'C0.code123@'
+    })
   })
 })

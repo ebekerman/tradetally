@@ -32,6 +32,86 @@ function redactAccountNumber(accountNumber) {
   return `****${value.slice(-4)}`;
 }
 
+function extractSchwabOAuthParams(input) {
+  if (!input || typeof input !== 'string') return { code: null, state: null, error: null, errorDescription: null };
+  const trimmed = input.trim();
+  if (!trimmed) return { code: null, state: null, error: null, errorDescription: null };
+
+  let parsedCode = null;
+  let parsedState = null;
+  let parsedError = null;
+  let parsedErrorDescription = null;
+
+  // 1. Try URL parsing
+  try {
+    const urlStr = trimmed.startsWith('http://') || trimmed.startsWith('https://')
+      ? trimmed
+      : (trimmed.includes('?') || trimmed.includes('/'))
+        ? `https://dummy.local/${trimmed.replace(/^\/+/, '')}`
+        : null;
+
+    if (urlStr) {
+      const parsed = new URL(urlStr);
+      parsedCode = parsed.searchParams.get('code');
+      parsedState = parsed.searchParams.get('state');
+      parsedError = parsed.searchParams.get('error');
+      parsedErrorDescription = parsed.searchParams.get('error_description');
+    }
+  } catch (_) {}
+
+  // 2. Try URLSearchParams on query part
+  if (!parsedCode && !parsedError) {
+    const queryIdx = trimmed.indexOf('?');
+    const queryPart = queryIdx !== -1 ? trimmed.slice(queryIdx + 1) : trimmed;
+    try {
+      const searchParams = new URLSearchParams(queryPart);
+      if (searchParams.has('code')) parsedCode = searchParams.get('code');
+      if (searchParams.has('state')) parsedState = searchParams.get('state');
+      if (searchParams.has('error')) parsedError = searchParams.get('error');
+      if (searchParams.has('error_description')) parsedErrorDescription = searchParams.get('error_description');
+    } catch (_) {}
+  }
+
+  // 3. Fallback regex search for code and state
+  if (!parsedCode && !parsedError) {
+    const codeMatch = trimmed.match(/[?&]code=([^&#]+)/);
+    if (codeMatch) {
+      try { parsedCode = decodeURIComponent(codeMatch[1]); } catch (_) { parsedCode = codeMatch[1]; }
+    }
+    const stateMatch = trimmed.match(/[?&]state=([^&#]+)/);
+    if (stateMatch) {
+      try { parsedState = decodeURIComponent(stateMatch[1]); } catch (_) { parsedState = stateMatch[1]; }
+    }
+    const errorMatch = trimmed.match(/[?&]error=([^&#]+)/);
+    if (errorMatch) {
+      try { parsedError = decodeURIComponent(errorMatch[1]); } catch (_) { parsedError = errorMatch[1]; }
+    }
+  }
+
+  // 4. Raw candidate Schwab code (must start with C0. or C1.)
+  if (!parsedCode && !parsedError) {
+    if ((trimmed.startsWith('C0.') || trimmed.startsWith('C1.')) && !trimmed.includes('&') && !trimmed.includes('=')) {
+      try { parsedCode = decodeURIComponent(trimmed); } catch (_) { parsedCode = trimmed; }
+    }
+  }
+
+  // 5. Ensure any percent-encoded characters like %40 are decoded to @
+  if (parsedCode && parsedCode.includes('%40')) {
+    try {
+      parsedCode = decodeURIComponent(parsedCode);
+    } catch (_) {
+      parsedCode = parsedCode.replace(/%40/g, '@');
+    }
+  }
+
+  return {
+    code: parsedCode,
+    state: parsedState,
+    error: parsedError,
+    errorDescription: parsedErrorDescription
+  };
+}
+
 function normalizeExcludedAccountIdentifiers(value) {
   if (!Array.isArray(value)) return [];
 
@@ -361,7 +441,8 @@ const brokerSyncController = {
 
       res.json({
         success: true,
-        authUrl: authUrl.toString()
+        authUrl: authUrl.toString(),
+        state: stateToken
       });
     } catch (error) {
       logger.logError('Error initiating Schwab OAuth:', error);
@@ -522,6 +603,214 @@ const brokerSyncController = {
         details: error.message || 'oauth_failed',
         status: errorCode
       });
+    }
+  },
+
+  /**
+   * Exchange Schwab OAuth authorization code from pasted redirect URL or code
+   */
+  async exchangeSchwabCode(req, res, next) {
+    try {
+      const userId = req.user.id;
+
+      // Broker sync is a Pro feature
+      const access = await TierService.canCreateBrokerConnection(userId, req.headers?.host);
+      if (!access.allowed) {
+        return sendProRequired(res, access);
+      }
+
+      // Check if Schwab OAuth is configured
+      if (!process.env.SCHWAB_CLIENT_ID || !process.env.SCHWAB_CLIENT_SECRET) {
+        return res.status(503).json({
+          success: false,
+          error: 'Schwab integration is not configured on this server'
+        });
+      }
+
+      const {
+        redirectUrl,
+        code: directCode,
+        state: directState,
+        accountLabel,
+        autoSyncEnabled,
+        syncFrequency,
+        syncTime,
+        syncStartDate
+      } = req.body;
+
+      const extracted = extractSchwabOAuthParams(redirectUrl || directCode || '');
+
+      if (extracted.error) {
+        return res.status(400).json({
+          success: false,
+          error: `Schwab authentication error: ${extracted.errorDescription || extracted.error}`
+        });
+      }
+
+      const code = extracted.code || directCode;
+      const state = directState || extracted.state;
+
+      if (!code) {
+        return res.status(400).json({
+          success: false,
+          error: 'Could not find a valid Schwab authorization code in the provided URL or code'
+        });
+      }
+
+      let savedContext = {};
+      if (state) {
+        const stateLookup = await db.query(
+          `UPDATE oauth_pending_states
+              SET consumed_at = NOW()
+            WHERE state_token = $1
+              AND provider = 'schwab'
+              AND consumed_at IS NULL
+              AND expires_at > NOW()
+            RETURNING user_id, context`,
+          [state]
+        );
+
+        if (stateLookup.rows.length > 0) {
+          if (stateLookup.rows[0].user_id !== userId) {
+            console.warn(`[SCHWAB-EXCHANGE] State token belongs to user ${stateLookup.rows[0].user_id}, but caller is ${userId}`);
+            return res.status(403).json({
+              success: false,
+              error: 'Invalid or mismatched authorization state'
+            });
+          }
+          savedContext = normalizeOAuthContext(stateLookup.rows[0].context);
+        }
+      }
+
+      const existingConnections = await BrokerConnection.findByUserId(userId, false);
+      const existingSchwab = existingConnections.find(c => c.brokerType === 'schwab');
+
+      // Exchange code for tokens
+      console.log('[SCHWAB-EXCHANGE] Exchanging authorization code for tokens...');
+      console.log('[SCHWAB-EXCHANGE] Redirect URI:', process.env.SCHWAB_REDIRECT_URI);
+
+      const axios = require('axios');
+      let tokenResponse;
+      try {
+        tokenResponse = await axios.post(
+          'https://api.schwabapi.com/v1/oauth/token',
+          new URLSearchParams({
+            grant_type: 'authorization_code',
+            code,
+            redirect_uri: process.env.SCHWAB_REDIRECT_URI
+          }),
+          {
+            auth: {
+              username: process.env.SCHWAB_CLIENT_ID,
+              password: process.env.SCHWAB_CLIENT_SECRET
+            },
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded'
+            }
+          }
+        );
+      } catch (tokenErr) {
+        console.error('[SCHWAB-EXCHANGE] Token exchange error:', tokenErr.response?.data || tokenErr.message);
+        const errDetail = tokenErr.response?.data?.error_description || tokenErr.response?.data?.error || tokenErr.message;
+        return res.status(400).json({
+          success: false,
+          error: `Schwab token exchange failed: ${errDetail}. Please make sure you completed login and pasted the fresh redirect URL immediately.`
+        });
+      }
+
+      console.log('[SCHWAB-EXCHANGE] Token exchange successful');
+      const { access_token, refresh_token, expires_in } = tokenResponse.data;
+      const expiresAt = new Date(Date.now() + expires_in * 1000);
+
+      // Get account info
+      console.log('[SCHWAB-EXCHANGE] Fetching account info...');
+      let accountsResponse;
+      try {
+        accountsResponse = await axios.get(
+          'https://api.schwabapi.com/trader/v1/accounts',
+          {
+            headers: {
+              Authorization: `Bearer ${access_token}`
+            }
+          }
+        );
+      } catch (accErr) {
+        console.error('[SCHWAB-EXCHANGE] Failed to fetch accounts:', accErr.message);
+        return res.status(400).json({
+          success: false,
+          error: `Schwab token received, but failed to fetch accounts: ${accErr.response?.data?.message || accErr.message}`
+        });
+      }
+
+      const accountNumber = accountsResponse.data?.[0]?.securitiesAccount?.accountNumber;
+      const schwabAccounts = (accountsResponse.data || [])
+        .map(account => redactAccountNumber(account?.securitiesAccount?.accountNumber))
+        .filter(Boolean)
+        .map(accountIdentifier => ({ account_identifier: accountIdentifier }));
+
+      // Merge settings: request body > saved context > existing connection > defaults
+      const finalAccountLabel = accountLabel !== undefined && accountLabel !== null
+        ? (accountLabel || null)
+        : (savedContext.accountLabel || (existingSchwab ? existingSchwab.accountLabel : null));
+
+      const finalAutoSync = autoSyncEnabled !== undefined
+        ? Boolean(autoSyncEnabled)
+        : (savedContext.autoSyncEnabled !== undefined
+            ? Boolean(savedContext.autoSyncEnabled)
+            : (existingSchwab ? existingSchwab.autoSyncEnabled : false));
+
+      const finalSyncFrequency = syncFrequency
+        || savedContext.syncFrequency
+        || (existingSchwab ? existingSchwab.syncFrequency : 'daily');
+
+      const finalSyncTime = syncTime
+        || savedContext.syncTime
+        || (existingSchwab ? existingSchwab.syncTime : '06:00:00');
+
+      const finalSyncStartDate = syncStartDate !== undefined
+        ? (syncStartDate || null)
+        : (savedContext.syncStartDate !== undefined
+            ? (savedContext.syncStartDate || null)
+            : (existingSchwab ? existingSchwab.syncStartDate : null));
+
+      console.log('[SCHWAB-EXCHANGE] Creating/updating broker connection for user:', userId);
+      const connection = await BrokerConnection.create(userId, {
+        brokerType: 'schwab',
+        schwabAccessToken: access_token,
+        schwabRefreshToken: refresh_token,
+        schwabTokenExpiresAt: expiresAt,
+        schwabAccountId: accountNumber,
+        brokerMetadata: {
+          schwab_accounts: schwabAccounts
+        },
+        accountLabel: finalAccountLabel,
+        autoSyncEnabled: finalAutoSync,
+        syncFrequency: finalSyncFrequency,
+        syncTime: finalSyncTime,
+        syncStartDate: finalSyncStartDate
+      });
+
+      await BrokerConnection.updateStatus(connection.id, 'active', 'Schwab OAuth authorization successful');
+      console.log('[SCHWAB-EXCHANGE] Connection status updated to active');
+
+      if (finalAutoSync && finalSyncFrequency !== 'manual') {
+        const userTimezone = await getUserTimezone(userId);
+        const nextSync = BrokerConnection.calculateNextSync(finalSyncFrequency, finalSyncTime, userTimezone);
+        if (nextSync) {
+          await BrokerConnection.update(connection.id, { nextScheduledSync: nextSync });
+        }
+      }
+
+      const updatedConnection = await BrokerConnection.findById(connection.id, false);
+
+      return res.status(200).json({
+        success: true,
+        data: updatedConnection,
+        message: existingSchwab ? 'Schwab tokens updated successfully' : 'Schwab account connected successfully'
+      });
+    } catch (error) {
+      logger.logError('Error exchanging Schwab OAuth code:', error);
+      next(error);
     }
   },
 
@@ -1299,5 +1588,7 @@ const brokerSyncController = {
     }
   }
 };
+
+brokerSyncController.extractSchwabOAuthParams = extractSchwabOAuthParams;
 
 module.exports = brokerSyncController;

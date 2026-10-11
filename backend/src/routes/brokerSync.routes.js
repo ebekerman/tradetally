@@ -55,6 +55,9 @@ router.get('/connections/schwab/callback', brokerSyncController.handleSchwabCall
 // Import Schwab tokens from JSON file / payload
 router.post('/connections/schwab/import-tokens', brokerSyncLimiter, validate(schemas.brokerSyncSchwabTokenImport), brokerSyncController.importSchwabTokens);
 
+// Exchange Schwab OAuth code from pasted redirect URL or code
+router.post('/connections/schwab/exchange-code', brokerSyncLimiter, validate(schemas.brokerSyncSchwabExchangeCode), brokerSyncController.exchangeSchwabCode);
+
 // Initialize direct broker OAuth flow
 router.post('/connections/:broker/init', brokerSyncController.initBrokerOAuth);
 

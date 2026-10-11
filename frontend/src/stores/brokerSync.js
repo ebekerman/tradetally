@@ -117,6 +117,23 @@ export const useBrokerSyncStore = defineStore('brokerSync', () => {
     }
   }
 
+  async function exchangeSchwabCode(payload) {
+    loading.value = true
+    error.value = null
+
+    try {
+      const response = await api.post('/broker-sync/connections/schwab/exchange-code', payload)
+      await fetchConnections()
+      return response.data.data
+    } catch (err) {
+      console.error('[BROKER-SYNC] Failed to exchange Schwab code:', err)
+      error.value = err.response?.data?.error || 'Failed to authenticate with Schwab'
+      throw err
+    } finally {
+      loading.value = false
+    }
+  }
+
   async function addTrading212Connection(connection) {
     loading.value = true
     error.value = null
@@ -346,6 +363,7 @@ export const useBrokerSyncStore = defineStore('brokerSync', () => {
     addTrading212Connection,
     initSchwabOAuth,
     importSchwabTokens,
+    exchangeSchwabCode,
     initBrokerOAuth,
     updateConnection,
     fetchConnectionAccounts,
